@@ -1,0 +1,773 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Claude Sessions</title>
+<style>
+  :root {
+    /* AI Makers brand — cream + terracotta (light mode default) */
+    --bg: #FAF6F0;
+    --panel: #FEFCF9;
+    --panel-2: #F3ECE0;
+    --border: #E2CDB3;
+    --text: #1A1A1D;
+    --text-mute: #6B6258;
+    --text-faint: #9C9184;
+    --accent: #D97757;
+    --accent-dark: #B35A3A;
+    --accent-deep: #8A4530;
+    --accent-soft: rgba(217,119,87,0.14);
+    --user: #3b82f6;
+    --assistant: #22C55E;
+    --danger: #EF4444;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1A1614;
+      --panel: #221D1A;
+      --panel-2: #2A231F;
+      --border: rgba(226,205,179,0.22);
+      --text: #FAF6F0;
+      --text-mute: #C9BEB0;
+      --text-faint: #8D8175;
+      --accent: #D97757;
+      --accent-dark: #E8926F;
+      --accent-deep: #E8926F;
+      --accent-soft: rgba(217,119,87,0.20);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .brand-mark {
+    display: flex; align-items: center; gap: 9px; margin-right: 8px;
+  }
+  .brand-mark svg { width: 26px; height: 26px; flex-shrink: 0; }
+  header h1 {
+    font-size: 16px; font-weight: 800; margin: 0;
+    letter-spacing: -0.01em; color: var(--text);
+  }
+  .brand-sub { font-size: 12.5px; font-weight: 400; color: var(--text-mute); }
+  header .count { color: var(--text-mute); font-size: 12px; margin-right: auto; }
+  input, select, button {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  input[type="search"] { width: 320px; }
+  button {
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  main { padding: 8px 24px 60px; max-width: 1100px; margin: 0 auto; }
+  .row {
+    display: flex; align-items: center; gap: 14px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    border-radius: 6px;
+  }
+  .row:hover { background: var(--panel); }
+  .row .title { flex: 1; min-width: 0; }
+  .row .title .t { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .title .p {
+    font-size: 11.5px; color: var(--text-faint);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    margin-top: 2px;
+  }
+  .row .meta { font-size: 11.5px; color: var(--text-mute); width: 110px; text-align: right; flex-shrink: 0; }
+  .row .msgs { font-size: 11.5px; color: var(--text-mute); width: 60px; text-align: right; flex-shrink: 0; }
+  .row .resume-btn {
+    flex-shrink: 0; font-size: 11.5px; padding: 5px 10px;
+    color: var(--accent); border-color: var(--accent-soft); background: transparent;
+  }
+  .row .resume-btn:hover { background: var(--accent-soft); }
+  .empty { color: var(--text-faint); text-align: center; padding: 60px 0; }
+
+  #modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    display: none; align-items: center; justify-content: center; z-index: 10;
+  }
+  #modal-backdrop.open { display: flex; }
+  #modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    width: min(760px, 92vw); height: min(82vh, 900px);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #modal-header {
+    padding: 14px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: flex-start; gap: 12px;
+  }
+  #modal-header .info { flex: 1; min-width: 0; }
+  #modal-header .mt { font-size: 14px; font-weight: 600; }
+  #modal-header .mp { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; }
+  #modal-header button { flex-shrink: 0; }
+  #modal-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+  .turn { margin-bottom: 14px; display: flex; gap: 10px; }
+  .turn .badge {
+    flex-shrink: 0; width: 64px; font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: 0.04em; padding-top: 3px; text-align: right;
+  }
+  .turn.user .badge { color: var(--user); }
+  .turn.assistant .badge { color: var(--assistant); }
+  .turn .content { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+  .turn.tool_use .content, .turn.tool_result .content {
+    color: var(--text-mute); background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-family: "Courier New", monospace; font-size: 12px;
+    cursor: pointer; max-height: 44px; overflow: hidden; position: relative;
+  }
+  .turn.tool_use .content.expanded, .turn.tool_result .content.expanded { max-height: none; }
+  .turn.tool_use .content::after, .turn.tool_result .content::after {
+    content: "click to expand"; position: absolute; bottom: 4px; right: 8px;
+    font-size: 10px; color: var(--text-faint); background: var(--panel-2); padding: 0 4px;
+  }
+  .turn.tool_use .content.expanded::after, .turn.tool_result .content.expanded::after { content: ""; }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 16px; border-radius: 6px; font-size: 12.5px; z-index: 20;
+    opacity: 0; transition: opacity 0.2s;
+  }
+  .toast.show { opacity: 1; }
+
+  /* nav tabs */
+  .tabs { display: flex; gap: 4px; margin-right: 8px; }
+  .tab-btn {
+    background: transparent; border: 1px solid transparent; color: var(--text-mute);
+    font-size: 13px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  }
+  .tab-btn.active { background: var(--panel-2); border-color: var(--border); color: var(--text); }
+  .tab-btn:hover { color: var(--text); }
+
+  /* accounts view */
+  #accounts-view { display: none; }
+  #accounts-bar {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+  }
+  #accounts-bar .last-updated { color: var(--text-faint); font-size: 11.5px; margin-right: auto; }
+  .hint {
+    color: var(--text-faint); font-size: 11.5px; padding: 8px 0 16px;
+  }
+  .accounts-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px;
+  }
+  .acct-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .acct-card.needs-refresh { opacity: 0.55; }
+  .acct-card.err { border-color: var(--danger); }
+  .acct-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+  .acct-email { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plan-badge {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em;
+    background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 2px 7px;
+    flex-shrink: 0;
+  }
+  .active-pill {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em;
+    background: rgba(34,197,94,0.15); color: var(--assistant); border-radius: 4px; padding: 2px 7px;
+    flex-shrink: 0;
+  }
+  .acct-service { font-size: 11px; color: var(--text-faint); margin-bottom: 12px; }
+  .make-active-btn { font-size: 11.5px; padding: 5px 10px; color: var(--accent); border-color: var(--accent-soft); background: transparent; flex-shrink: 0; }
+  .make-active-btn:hover { background: var(--accent-soft); }
+  .usage-row { margin-bottom: 10px; }
+  .usage-row .ul-top { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+  .usage-row .ul-label { color: var(--text-mute); }
+  .usage-row .ul-pct { color: var(--text); font-variant-numeric: tabular-nums; }
+  .usage-bar-track { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+  .usage-bar-fill { height: 100%; border-radius: 3px; }
+  .usage-bar-fill.green { background: var(--assistant); }
+  .usage-bar-fill.amber { background: var(--accent); }
+  .usage-bar-fill.red { background: var(--danger); }
+  .usage-row .ul-reset { font-size: 10.5px; color: var(--text-faint); margin-top: 3px; }
+  .acct-summary { display: flex; gap: 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-faint); }
+  .acct-note { font-size: 12px; color: var(--text-faint); font-style: italic; margin-top: 4px; }
+  .usage-note { font-size: 12px; color: var(--text-faint); margin: 6px 0 2px; }
+  .add-account-box {
+    margin-top: 22px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .add-account-box h3 { font-size: 13px; margin: 0 0 10px; font-weight: 600; }
+  .add-account-box textarea {
+    width: 100%; min-height: 80px; background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 8px 10px; font-family: "Courier New", monospace;
+    font-size: 12px; resize: vertical; box-sizing: border-box;
+  }
+  .add-account-box .row2 { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
+  .add-account-box input[type="text"] { flex: 1; }
+
+  .add-account-btn {
+    color: var(--bg); background: var(--accent); border-color: var(--accent);
+    font-weight: 600; font-size: 13px; padding: 7px 14px;
+  }
+  .add-account-btn:hover { opacity: 0.9; border-color: var(--accent); }
+
+  .remove-btn {
+    font-size: 11.5px; padding: 5px 9px; color: var(--danger); border-color: transparent;
+    background: transparent; flex-shrink: 0;
+  }
+  .remove-btn:hover { border-color: var(--danger); background: rgba(239,68,68,0.1); }
+
+  #add-account-panel {
+    margin-bottom: 16px; background: var(--panel); border: 1px solid var(--accent-soft); border-radius: 10px;
+    padding: 16px 18px;
+  }
+  #add-account-panel .aap-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  #add-account-panel .aap-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .aap-step { padding: 10px 0; border-top: 1px solid var(--border); }
+  .aap-step:first-of-type { border-top: none; padding-top: 0; }
+  .aap-step-label {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint);
+    margin-bottom: 8px;
+  }
+  .aap-hint {
+    font-size: 12.5px; color: var(--text-mute); margin-top: 10px; line-height: 1.5;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+  }
+  .aap-hint code {
+    font-family: "Courier New", monospace; background: var(--accent-soft); color: var(--accent);
+    padding: 1px 5px; border-radius: 3px;
+  }
+  details.advanced-import { margin-top: 22px; }
+  details.advanced-import summary {
+    cursor: pointer; font-size: 12.5px; color: var(--text-mute); padding: 6px 0;
+  }
+  details.advanced-import summary:hover { color: var(--text); }
+  details.advanced-import .add-account-box { margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand-mark">
+    <svg viewBox="0 0 64 64" aria-hidden="true">
+      <g transform="translate(32,32) rotate(45)">
+        <rect x="-17" y="-17" width="15" height="15" fill="#EF4444" rx="2.1"/>
+        <rect x="2" y="-17" width="15" height="15" fill="#F97316" rx="2.1"/>
+        <rect x="-17" y="2" width="15" height="15" fill="#22C55E" rx="2.1"/>
+        <rect x="2" y="2" width="15" height="15" fill="#3B82F6" rx="2.1"/>
+      </g>
+    </svg>
+    <h1>AI Makers</h1>
+    <span class="brand-sub">· Claude Sessions</span>
+  </div>
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-sessions">Sessions</button>
+    <button class="tab-btn" id="tab-accounts">Accounts</button>
+  </div>
+  <span class="count" id="count"></span>
+  <input type="search" id="search" placeholder="Search title, prompt, project…" />
+  <select id="project"><option value="">All projects</option></select>
+  <select id="sort">
+    <option value="last">Last active</option>
+    <option value="first">Started</option>
+    <option value="msgs">Message count</option>
+    <option value="size">Size</option>
+  </select>
+  <button id="refresh">Refresh</button>
+</header>
+
+<main>
+  <div id="sessions-view">
+    <div id="list"></div>
+  </div>
+
+  <div id="accounts-view">
+    <div id="accounts-bar">
+      <button class="add-account-btn" id="add-account-open-btn">＋ Add account</button>
+      <span class="last-updated" id="accounts-updated"></span>
+      <button id="accounts-refresh">Refresh</button>
+    </div>
+    <div class="hint">First run may prompt macOS Keychain access — click "Always Allow" for each account.</div>
+
+    <div id="add-account-panel" style="display:none;">
+      <div class="aap-head">
+        <h3>Waiting for browser sign-in…</h3>
+        <button id="aap-cancel">Cancel</button>
+      </div>
+      <div class="aap-hint">
+        A browser tab opened to the Claude login page. Sign in and approve — the
+        account is added automatically and this panel refreshes when it lands.
+        If no tab opened, <a href="#" id="aap-open-link" style="color:var(--accent);">click here</a>.
+      </div>
+    </div>
+
+    <div class="accounts-grid" id="accounts-grid"></div>
+
+    <details class="advanced-import">
+      <summary>Advanced: paste credential JSON</summary>
+      <div class="add-account-box">
+        <h3>Import from JSON</h3>
+        <textarea id="import-json" placeholder='Paste credential JSON, e.g. {"claudeAiOauth":{"accessToken":"...", ...}}'></textarea>
+        <div class="row2">
+          <input type="text" id="import-label" placeholder="Optional label (e.g. a name to show instead of the email)" />
+          <button id="import-btn">Import</button>
+        </div>
+      </div>
+    </details>
+  </div>
+</main>
+
+<div id="modal-backdrop">
+  <div id="modal">
+    <div id="modal-header">
+      <div class="info">
+        <div class="mt" id="modal-title"></div>
+        <div class="mp" id="modal-path"></div>
+      </div>
+      <button id="modal-resume">Resume</button>
+      <button id="modal-close">Close</button>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let sessions = [];
+
+function fmtRelative(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso).getTime();
+  const diff = Date.now() - d;
+  const m = 60000, h = 3600000, day = 86400000;
+  if (diff < h) return Math.max(1, Math.round(diff / m)) + 'm ago';
+  if (diff < day) return Math.round(diff / h) + 'h ago';
+  if (diff < day * 30) return Math.round(diff / day) + 'd ago';
+  return new Date(iso).toLocaleDateString();
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '—';
+  const kb = bytes / 1024;
+  if (kb < 1024) return Math.round(kb) + ' KB';
+  return (kb / 1024).toFixed(1) + ' MB';
+}
+
+function shortenPath(p) {
+  if (!p) return '(unknown project)';
+  return p.replace(/^\/Users\/[^/]+/, '~');
+}
+
+async function load() {
+  const res = await fetch('/api/sessions');
+  sessions = await res.json();
+  populateProjects();
+  render();
+}
+
+function populateProjects() {
+  const sel = document.getElementById('project');
+  const cur = sel.value;
+  const projects = [...new Set(sessions.map(s => s.cwd).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">All projects</option>' +
+    projects.map(p => `<option value="${p}">${shortenPath(p)}</option>`).join('');
+  sel.value = cur;
+}
+
+function render() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  const proj = document.getElementById('project').value;
+  const sortBy = document.getElementById('sort').value;
+
+  let filtered = sessions.filter(s => {
+    if (proj && s.cwd !== proj) return false;
+    if (!q) return true;
+    return (s.title || '').toLowerCase().includes(q) ||
+           (s.lastPrompt || '').toLowerCase().includes(q) ||
+           (s.cwd || '').toLowerCase().includes(q);
+  });
+
+  filtered.sort((a, b) => {
+    if (sortBy === 'first') return (b.firstTimestamp || '').localeCompare(a.firstTimestamp || '');
+    if (sortBy === 'msgs') return (b.userCount + b.assistantCount) - (a.userCount + a.assistantCount);
+    if (sortBy === 'size') return (b.size || 0) - (a.size || 0);
+    return (b.lastTimestamp || '').localeCompare(a.lastTimestamp || '');
+  });
+
+  document.getElementById('count').textContent = `${filtered.length} of ${sessions.length}`;
+
+  const list = document.getElementById('list');
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty">No sessions match.</div>';
+    return;
+  }
+
+  list.innerHTML = filtered.map(s => `
+    <div class="row" data-id="${encodeURIComponent(s.id)}">
+      <div class="title">
+        <div class="t">${escapeHtml(s.title)}</div>
+        <div class="p">${escapeHtml(shortenPath(s.cwd))}${s.gitBranch ? ' · ' + escapeHtml(s.gitBranch) : ''}</div>
+      </div>
+      <div class="msgs">${s.userCount + s.assistantCount} msgs</div>
+      <div class="meta">${fmtSize(s.size)} · ${fmtRelative(s.lastTimestamp)}</div>
+      <button class="resume-btn" data-resume="${encodeURIComponent(s.id)}">Resume</button>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('.row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.resume-btn')) return;
+      openSession(decodeURIComponent(row.dataset.id));
+    });
+  });
+  list.querySelectorAll('.resume-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      resumeSession(decodeURIComponent(btn.dataset.resume));
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function openSession(id) {
+  const res = await fetch('/api/session/' + encodeURIComponent(id));
+  const data = await res.json();
+  if (data.error) return showToast('Could not load session');
+
+  document.getElementById('modal-title').textContent = data.session.title;
+  document.getElementById('modal-path').textContent = shortenPath(data.session.cwd);
+  document.getElementById('modal-resume').dataset.id = id;
+
+  const body = document.getElementById('modal-body');
+  body.innerHTML = data.turns.map(t => {
+    if (t.kind === 'text') {
+      return `<div class="turn ${t.role}">
+        <div class="badge">${t.role}</div>
+        <div class="content">${escapeHtml(t.text)}</div>
+      </div>`;
+    }
+    if (t.kind === 'tool_use') {
+      return `<div class="turn assistant tool_use">
+        <div class="badge">tool</div>
+        <div class="content" onclick="this.classList.toggle('expanded')">${escapeHtml(t.name)}(${escapeHtml(t.input)})</div>
+      </div>`;
+    }
+    if (t.kind === 'tool_result') {
+      return `<div class="turn user tool_result">
+        <div class="badge">result</div>
+        <div class="content" onclick="this.classList.toggle('expanded')">${escapeHtml(t.text)}</div>
+      </div>`;
+    }
+    return '';
+  }).join('');
+
+  document.getElementById('modal-backdrop').classList.add('open');
+}
+
+async function resumeSession(id) {
+  showToast('Opening Terminal…');
+  const res = await fetch('/api/resume/' + encodeURIComponent(id), { method: 'POST' });
+  const data = await res.json();
+  if (data.error) showToast('Resume failed: ' + data.error);
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(showToast._h);
+  showToast._h = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+document.getElementById('search').addEventListener('input', debounce(render, 120));
+document.getElementById('project').addEventListener('change', render);
+document.getElementById('sort').addEventListener('change', render);
+document.getElementById('refresh').addEventListener('click', load);
+document.getElementById('modal-close').addEventListener('click', () => {
+  document.getElementById('modal-backdrop').classList.remove('open');
+});
+document.getElementById('modal-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'modal-backdrop') e.target.classList.remove('open');
+});
+document.getElementById('modal-resume').addEventListener('click', (e) => {
+  resumeSession(e.target.dataset.id);
+});
+
+function debounce(fn, ms) {
+  let h;
+  return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
+}
+
+// ---------- accounts view ----------
+
+let accountsLoaded = false;
+
+function showTab(tab) {
+  const sessionsControls = ['search', 'project', 'sort'];
+  if (tab === 'accounts') {
+    document.getElementById('tab-accounts').classList.add('active');
+    document.getElementById('tab-sessions').classList.remove('active');
+    document.getElementById('sessions-view').style.display = 'none';
+    document.getElementById('accounts-view').style.display = 'block';
+    sessionsControls.forEach(id => document.getElementById(id).style.display = 'none');
+    document.getElementById('count').style.display = 'none';
+    if (!accountsLoaded) loadAccounts();
+  } else {
+    document.getElementById('tab-sessions').classList.add('active');
+    document.getElementById('tab-accounts').classList.remove('active');
+    document.getElementById('sessions-view').style.display = 'block';
+    document.getElementById('accounts-view').style.display = 'none';
+    sessionsControls.forEach(id => document.getElementById(id).style.display = '');
+    document.getElementById('count').style.display = '';
+  }
+}
+
+document.getElementById('tab-sessions').addEventListener('click', () => showTab('sessions'));
+document.getElementById('tab-accounts').addEventListener('click', () => showTab('accounts'));
+document.getElementById('accounts-refresh').addEventListener('click', loadAccounts);
+document.getElementById('import-btn').addEventListener('click', importAccount);
+
+function fmtResetTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const weekday = d.toLocaleDateString(undefined, { weekday: 'short' });
+  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return `Resets ${weekday} ${time}`;
+}
+
+function barColor(percent, severity) {
+  if (severity === 'high' || percent >= 90) return 'red';
+  if (severity === 'warning' || percent >= 70) return 'amber';
+  return 'green';
+}
+
+function renderUsageRow(l) {
+  const pct = Math.round(l.percent || 0);
+  const color = barColor(pct, l.severity);
+  return `
+    <div class="usage-row">
+      <div class="ul-top">
+        <span class="ul-label">${escapeHtml(l.label || l.kind)}</span>
+        <span class="ul-pct">${pct}%</span>
+      </div>
+      <div class="usage-bar-track"><div class="usage-bar-fill ${color}" style="width:${Math.min(100, pct)}%"></div></div>
+      <div class="ul-reset">${escapeHtml(fmtResetTime(l.resets_at))}</div>
+    </div>`;
+}
+
+// Degraded-but-not-blank usage line. Returns null when real usage bars should render.
+function usageNote(a) {
+  if (a.usage) return null;
+  if (a.usageError === '429') return 'At limit';
+  if (a.usageError) return 'Usage unavailable (rate-limited)';
+  return null;
+}
+
+function renderAccountCard(a) {
+  // needs_refresh: token expired, not switchable — minimal card, still visible.
+  if (a.status === 'needs_refresh') {
+    return `
+      <div class="acct-card needs-refresh">
+        <div class="acct-head">
+          <div class="acct-email">${escapeHtml(a.email || a.service)}</div>
+        </div>
+        <div class="acct-service">${escapeHtml(a.service)}</div>
+        <div class="acct-note">Session expired — re-add to refresh</div>
+      </div>`;
+  }
+
+  // status "ok" with usage:null (e.g. usageError:"429") and status "error" both
+  // render as a normal, switchable card — just swap the usage bars for a muted note.
+  const limits = (a.usage && a.usage.limits) || [];
+  const fiveHour = a.usage && a.usage.five_hour;
+  const sevenDay = a.usage && a.usage.seven_day;
+  const note = a.status === 'error' ? 'Usage unavailable — tap Refresh' : usageNote(a);
+
+  return `
+    <div class="acct-card${a.status === 'error' ? ' err' : ''}">
+      <div class="acct-head">
+        <div class="acct-email">${escapeHtml(a.email || a.service)}</div>
+        ${a.plan ? `<span class="plan-badge">${escapeHtml(a.plan)}</span>` : ''}
+        ${a.isActive ? '<span class="active-pill">Active</span>' : `<button class="make-active-btn" data-service="${encodeURIComponent(a.service)}" data-email="${encodeURIComponent(a.email || a.service)}">Make active</button>`}
+        ${a.isActive ? '' : `<button class="remove-btn" data-service="${encodeURIComponent(a.service)}" title="Remove account">Remove</button>`}
+      </div>
+      <div class="acct-service">${escapeHtml(a.service)}</div>
+      ${note ? `<div class="usage-note">${escapeHtml(note)}</div>` : limits.map(renderUsageRow).join('')}
+      ${(fiveHour || sevenDay) ? `
+      <div class="acct-summary">
+        ${fiveHour ? `<span>5h: ${Math.round(fiveHour.utilization || 0)}%</span>` : ''}
+        ${sevenDay ? `<span>7d: ${Math.round(sevenDay.utilization || 0)}%</span>` : ''}
+      </div>` : ''}
+    </div>`;
+}
+
+async function loadAccounts() {
+  const grid = document.getElementById('accounts-grid');
+  grid.innerHTML = '<div class="empty">Loading accounts… (Keychain may prompt for access)</div>';
+  try {
+    const res = await fetch('/api/accounts');
+    const accounts = await res.json();
+    accountsLoaded = true;
+    document.getElementById('accounts-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+
+    if (!accounts.length) {
+      grid.innerHTML = '<div class="empty">No accounts found.</div>';
+      return;
+    }
+
+    grid.innerHTML = accounts.map(renderAccountCard).join('');
+    grid.querySelectorAll('.make-active-btn').forEach(btn => {
+      btn.addEventListener('click', () => makeActive(decodeURIComponent(btn.dataset.service), decodeURIComponent(btn.dataset.email)));
+    });
+    grid.querySelectorAll('.remove-btn').forEach(btn => {
+      btn.addEventListener('click', () => removeAccount(decodeURIComponent(btn.dataset.service)));
+    });
+  } catch (e) {
+    grid.innerHTML = '<div class="empty">Failed to load accounts.</div>';
+  }
+}
+
+async function removeAccount(service) {
+  if (!confirm('Remove this account from the dashboard? This deletes its saved Keychain stash.')) return;
+  showToast('Removing…');
+  try {
+    const res = await fetch('/api/accounts/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      showToast('Remove failed: ' + data.error);
+      return;
+    }
+    showToast('Account removed');
+    loadAccounts();
+  } catch (e) {
+    showToast('Remove failed');
+  }
+}
+
+// ---------- one-click OAuth add-account flow ----------
+
+let loginPoll = null;
+let lastAuthorizeUrl = null;
+
+function closeAddAccountPanel() {
+  document.getElementById('add-account-panel').style.display = 'none';
+  if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
+}
+
+async function startLogin() {
+  showToast('Opening browser…');
+  try {
+    const res = await fetch('/api/accounts/login-start', { method: 'POST' });
+    const data = await res.json();
+    if (data.error) {
+      showToast('Could not start login: ' + data.error);
+      return;
+    }
+    lastAuthorizeUrl = data.authorizeUrl || null;
+    document.getElementById('add-account-panel').style.display = 'block';
+    if (loginPoll) clearInterval(loginPoll);
+    loginPoll = setInterval(pollLoginStatus, 1500);
+  } catch (e) {
+    showToast('Could not start login');
+  }
+}
+
+async function pollLoginStatus() {
+  try {
+    const res = await fetch('/api/accounts/login-status');
+    const data = await res.json();
+    if (data.status === 'done') {
+      closeAddAccountPanel();
+      showToast('Added ' + (data.email || 'account'));
+      loadAccounts();
+    } else if (data.status === 'error') {
+      closeAddAccountPanel();
+      showToast('Login failed: ' + (data.error || 'unknown error'));
+    } else if (data.status === 'idle') {
+      // Server reset state without a terminal result — stop polling quietly.
+      closeAddAccountPanel();
+    }
+  } catch (e) {
+    // transient — keep polling
+  }
+}
+
+document.getElementById('add-account-open-btn').addEventListener('click', startLogin);
+document.getElementById('aap-cancel').addEventListener('click', closeAddAccountPanel);
+document.getElementById('aap-open-link').addEventListener('click', (e) => {
+  e.preventDefault();
+  if (lastAuthorizeUrl) window.open(lastAuthorizeUrl, '_blank');
+});
+
+async function makeActive(service, email) {
+  const label = email || service;
+  const confirmed = confirm(
+    `Switch active account to ${label}? Claude Code will use this account for NEW sessions. ` +
+    `Running sessions keep their current account until restarted.`
+  );
+  if (!confirmed) return;
+
+  showToast('Activating…');
+  try {
+    const res = await fetch('/api/accounts/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      showToast('Activate failed: ' + data.error);
+      return;
+    }
+    showToast('Active account switched — restart running claude sessions to use it.');
+    loadAccounts();
+  } catch (e) {
+    showToast('Activate failed');
+  }
+}
+
+async function importAccount() {
+  const json = document.getElementById('import-json').value.trim();
+  const label = document.getElementById('import-label').value.trim();
+  if (!json) return showToast('Paste a credential JSON blob first');
+  try {
+    const res = await fetch('/api/accounts/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ json, label: label || undefined }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      showToast('Import failed: ' + data.error);
+      return;
+    }
+    document.getElementById('import-json').value = '';
+    document.getElementById('import-label').value = '';
+    showToast('Account imported');
+    loadAccounts();
+  } catch (e) {
+    showToast('Import failed');
+  }
+}
+
+load();
+</script>
+</body>
+</html>

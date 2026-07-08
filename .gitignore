@@ -1,0 +1,5 @@
+.cache/
+server.log
+*.app/
+.DS_Store
+node_modules/
