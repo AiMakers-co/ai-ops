@@ -21,7 +21,7 @@ fi
 
 swiftc \
   -O \
-  -target arm64-apple-macos13.0 \
+  -target "$(uname -m)-apple-macos13.0" \
   -framework SwiftUI \
   -framework AppKit \
   -framework ServiceManagement \
