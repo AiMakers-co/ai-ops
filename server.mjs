@@ -1370,9 +1370,11 @@ async function fetchCodexUsage(accessToken, accountId) {
   };
   if (accountId) headers['chatgpt-account-id'] = accountId;
 
+  // CONFIRMED endpoint (2026-07-09, live token): the real usage lives at
+  // /backend-api/wham/usage. `/codex/usage` returns an HTML error page.
   let res;
   try {
-    res = await fetch('https://chatgpt.com/backend-api/codex/usage', {
+    res = await fetch('https://chatgpt.com/backend-api/wham/usage', {
       headers,
       signal: AbortSignal.timeout(6_000),
     });
@@ -1390,30 +1392,36 @@ async function fetchCodexUsage(accessToken, accountId) {
     return { usage: null, usageError: 'parse' };
   }
 
-  // We got a 2xx JSON body but the shape is UNCONFIRMED. Try a defensive map
-  // into Claude's usage shape; if we can't recognise it, degrade to plan-only
-  // rather than invent numbers.
+  // Real shape: { email, plan_type, rate_limit:{ primary_window, secondary_window },
+  // additional_rate_limits:[{ limit_name, rate_limit:{ primary_window, secondary_window }}] }.
+  // Windows: primary = 5h session, secondary = 7d weekly; each { used_percent, reset_at (unix s) }.
+  const sev = (p) => (p >= 90 ? 'high' : p >= 70 ? 'warning' : 'normal');
+  const toLimit = (win, kind, label, scope) => {
+    if (!win || typeof win.used_percent !== 'number') return null;
+    const percent = Math.max(0, Math.min(100, Math.round(win.used_percent)));
+    return {
+      kind, label, percent, severity: sev(percent),
+      resets_at: win.reset_at ? new Date(win.reset_at * 1000).toISOString() : null,
+      ...(scope ? { scope } : {}),
+    };
+  };
   try {
+    const rl = body.rate_limit || {};
     const limits = [];
-    // Heuristic candidates — adjust once the real shape is known.
-    const buckets = [
-      { src: body.primary || body.five_hour || body.session, kind: 'session', label: 'Current session (5h)' },
-      { src: body.secondary || body.weekly || body.seven_day, kind: 'weekly_all', label: 'Weekly' },
-    ];
-    for (const b of buckets) {
-      if (!b.src || typeof b.src !== 'object') continue;
-      const used = b.src.used_percent ?? b.src.percent ?? null;
-      if (used == null) continue;
-      const percent = Math.max(0, Math.min(100, Number(used)));
-      limits.push({
-        kind: b.kind,
-        label: b.label,
-        percent,
-        severity: percent >= 100 ? 'critical' : percent >= 80 ? 'warning' : 'ok',
-        resets_at: b.src.resets_at || b.src.reset_at || null,
-      });
+    const session = toLimit(rl.primary_window, 'session', 'Current session');
+    if (session) limits.push(session);
+    const weekly = toLimit(rl.secondary_window, 'weekly_all', 'All models');
+    if (weekly) limits.push(weekly);
+    // Per-model limits (e.g. "GPT-5.3-Codex-Spark") → weekly-scoped rows.
+    for (const a of (body.additional_rate_limits || [])) {
+      const w = a.rate_limit?.secondary_window || a.rate_limit?.primary_window;
+      const scoped = toLimit(w, 'weekly_scoped', a.limit_name || 'model',
+        { model: { display_name: a.limit_name || 'model' } });
+      if (scoped) limits.push(scoped);
     }
-    if (limits.length) return { usage: { limits }, usageError: null };
+    if (limits.length) {
+      return { usage: { limits }, usageError: null, email: body.email || null };
+    }
     return { usage: null, usageError: 'unrecognized_shape' };
   } catch {
     return { usage: null, usageError: 'unrecognized_shape' };
