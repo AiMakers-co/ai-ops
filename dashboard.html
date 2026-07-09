@@ -526,6 +526,37 @@
   .auto-actions .run-btn:hover { background: var(--accent-soft); }
   .auto-actions .toggle-btn { color: var(--text-mute); background: transparent; }
   .auto-actions .logs-btn { color: var(--text-mute); background: transparent; }
+  .tbl-actions .hide-btn { color: var(--text-faint); background: transparent; }
+  .tbl-actions .hide-btn:hover { color: var(--text); border-color: var(--border); }
+
+  /* automation detail (expand) */
+  .auto-detail { padding: 2px 0 2px; }
+  .auto-kv { display: flex; align-items: baseline; gap: 10px; margin-top: 8px; font-size: 12px; }
+  .auto-kv .k {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint);
+    width: 110px; flex-shrink: 0; text-align: right;
+  }
+  .auto-kv .v {
+    color: var(--text-mute); flex: 1; min-width: 0; line-height: 1.5;
+  }
+  .auto-kv .v.mono {
+    font-family: "Courier New", monospace; font-size: 11.5px; color: var(--text);
+    word-break: break-all; white-space: pre-wrap;
+  }
+  .auto-kv .v .logs-inline {
+    margin-left: 8px; font-size: 11px; padding: 2px 8px; background: transparent;
+    color: var(--accent); border-color: var(--accent-soft); vertical-align: middle;
+  }
+  .auto-kv .v .logs-inline:hover { background: var(--accent-soft); }
+  .auto-detail-actions {
+    display: flex; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  .auto-detail-actions button { font-size: 11.5px; padding: 5px 10px; background: transparent; }
+  .auto-detail-actions .run-btn { color: var(--accent); border-color: var(--accent-soft); }
+  .auto-detail-actions .run-btn:hover { background: var(--accent-soft); }
+  .auto-detail-actions .toggle-btn, .auto-detail-actions .logs-btn { color: var(--text-mute); }
+  .auto-detail-actions .hide-btn { color: var(--danger); border-color: transparent; margin-left: auto; }
+  .auto-detail-actions .hide-btn:hover { border-color: var(--danger); background: rgba(239,68,68,0.1); }
 
   /* mcp */
   .mcp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
@@ -725,6 +756,7 @@
   <div id="automations-view">
     <div class="view-bar">
       <span class="summary" id="auto-summary"></span>
+      <button class="reveal-all-btn" id="auto-hidden-toggle" style="display:none;"></button>
     </div>
     <div id="auto-list"></div>
   </div>
@@ -1443,32 +1475,139 @@ function autoStatusClass(a) {
   return 'idle';
 }
 
+// ---- hide / dismiss (persisted in localStorage) ----
+let autoShowHidden = false;
+function getHiddenAutos() {
+  try { const v = JSON.parse(localStorage.getItem('hiddenAutomations') || '[]'); return Array.isArray(v) ? v : []; }
+  catch (e) { return []; }
+}
+function setHiddenAutos(arr) {
+  localStorage.setItem('hiddenAutomations', JSON.stringify([...new Set(arr)]));
+}
+function hideAutomation(id) {
+  const h = getHiddenAutos();
+  if (!h.includes(id)) { h.push(id); setHiddenAutos(h); showToast('Hidden'); }
+  loadAutomations();
+}
+function unhideAutomation(id) {
+  setHiddenAutos(getHiddenAutos().filter(x => x !== id));
+  showToast('Shown');
+  loadAutomations();
+}
+
+// Human status line for the detail view (pid + last exit).
+function autoStatusText(a) {
+  const bits = [a.status || 'idle'];
+  if (a.pid != null) bits.push('pid ' + a.pid);
+  if (a.lastExit != null) bits.push('last exit ' + a.lastExit);
+  return bits.join(' · ');
+}
+
+function autoKv(label, value, mono) {
+  return `<div class="auto-kv"><span class="k">${escapeHtml(label)}</span>` +
+    `<span class="v${mono ? ' mono' : ''}">${value}</span></div>`;
+}
+
+// Full detail sub-row content for one automation.
+function autoDetailHtml(a) {
+  const enc = encodeURIComponent(a.id);
+  const nameEnc = encodeURIComponent(a.name);
+  let d = '';
+  d += autoKv('Type', escapeHtml(a.kind));
+  d += autoKv('Status', escapeHtml(autoStatusText(a)));
+  d += autoKv('Enabled', a.enabled ? 'yes' : '<span style="color:var(--text-faint)">no (disabled)</span>');
+
+  const rawSched = a.kind === 'cron'
+    ? (a.rawSchedule || '')
+    : (a.rawSchedule ? JSON.stringify(a.rawSchedule) : '');
+  const schedVal = escapeHtml(a.schedule || '—') +
+    (rawSched ? `  <span style="color:var(--text-faint)">(${escapeHtml(rawSched)})</span>` : '');
+  d += autoKv('Schedule', schedVal);
+  d += autoKv('Next run', escapeHtml(fmtRelative(a.nextRun)) + (a.nextRun ? `  <span style="color:var(--text-faint)">${escapeHtml(a.nextRun)}</span>` : ''));
+  d += autoKv('Last run', escapeHtml(fmtRelative(a.lastRun)) + (a.lastRun ? `  <span style="color:var(--text-faint)">${escapeHtml(a.lastRun)}</span>` : ''));
+
+  if (a.command) d += autoKv('Command', escapeHtml(a.command), true);
+  if (Array.isArray(a.programArguments) && a.programArguments.length) {
+    d += autoKv('ProgramArguments', a.programArguments.map(x => escapeHtml(String(x))).join('\n'), true);
+  }
+  if (a.workingDir) d += autoKv('Working dir', escapeHtml(a.workingDir), true);
+
+  if (a.logPath) {
+    const logBtn = `<button class="logs-inline" data-id="${enc}" data-name="${nameEnc}">View logs</button>`;
+    d += autoKv('Log path', `<span style="font-family:'Courier New',monospace;font-size:11.5px;color:var(--text);word-break:break-all;">${escapeHtml(a.logPath)}</span>${logBtn}`);
+  }
+  if (a.stdout && a.stdout !== a.logPath) d += autoKv('Stdout', escapeHtml(a.stdout), true);
+  if (a.stderr && a.stderr !== a.logPath) d += autoKv('Stderr', escapeHtml(a.stderr), true);
+
+  if (a.kind === 'cron') {
+    if (a.fullComment) d += autoKv('Comment', escapeHtml(a.fullComment));
+    if (a.rawLine) d += autoKv('Crontab line', escapeHtml(a.rawLine), true);
+  } else {
+    if (a.plistPath) d += autoKv('Plist path', escapeHtml(a.plistPath), true);
+    if (a.runAtLoad != null) d += autoKv('RunAtLoad', escapeHtml(String(a.runAtLoad)));
+    if (a.keepAlive != null) d += autoKv('KeepAlive', escapeHtml(typeof a.keepAlive === 'object' ? JSON.stringify(a.keepAlive) : String(a.keepAlive)));
+    if (a.envVars && typeof a.envVars === 'object') {
+      d += autoKv('Environment', Object.entries(a.envVars).map(([k, v]) => escapeHtml(k + '=' + v)).join('\n'), true);
+    }
+    if (a.statusLine) d += autoKv('launchctl', escapeHtml(a.statusLine), true);
+  }
+
+  const hidden = getHiddenAutos().includes(a.id);
+  d += `<div class="auto-detail-actions">
+      <button class="run-btn" data-id="${enc}">Run</button>
+      <button class="toggle-btn" data-id="${enc}" data-enabled="${a.enabled}">${a.enabled ? 'Disable' : 'Enable'}</button>
+      <button class="logs-btn" data-id="${enc}" data-name="${nameEnc}">Logs</button>
+      <button class="hide-btn" data-id="${enc}" data-hidden="${hidden}">${hidden ? 'Show' : 'Hide'}</button>
+    </div>`;
+  return `<div class="auto-detail">${d}</div>`;
+}
+
 async function loadAutomations() {
   const list = document.getElementById('auto-list');
   list.innerHTML = '<div class="empty">Loading automations…</div>';
   try {
     const res = await fetch('/api/automations');
-    const items = await res.json();
+    const allItems = await res.json();
     loaded.automations = true;
 
-    const running = items.filter(a => a.status === 'running').length;
-    const failed = items.filter(a => a.lastExit !== 0 && a.lastExit != null).length;
-    document.getElementById('auto-summary').innerHTML =
-      `<b>${items.length}</b> automations · <b>${running}</b> running · <b>${failed}</b> failed`;
+    const hiddenIds = getHiddenAutos();
+    const hiddenSet = new Set(hiddenIds);
+    const visible = allItems.filter(a => !hiddenSet.has(a.id));
+    const hiddenCount = allItems.length - visible.length;
+    // Which rows to render: visible always; hidden too when the reveal toggle is on.
+    const items = autoShowHidden ? allItems : visible;
+
+    const running = visible.filter(a => a.status === 'running').length;
+    const failed = visible.filter(a => a.lastExit !== 0 && a.lastExit != null).length;
+    let summary = `<b>${visible.length}</b> automations · <b>${running}</b> running · <b>${failed}</b> failed`;
+    if (hiddenCount) summary += ` · <span style="color:var(--text-faint)">${hiddenCount} hidden</span>`;
+    document.getElementById('auto-summary').innerHTML = summary;
+
+    const toggleBtn = document.getElementById('auto-hidden-toggle');
+    if (hiddenCount) {
+      toggleBtn.style.display = '';
+      toggleBtn.textContent = autoShowHidden ? 'Hide hidden' : `${hiddenCount} hidden — show`;
+    } else {
+      toggleBtn.style.display = 'none';
+      autoShowHidden = false;
+    }
     setUpdated();
 
     if (!items.length) { list.innerHTML = '<div class="empty">No automations found.</div>'; return; }
 
+    let did = 0;
     const body = items.map(a => {
       const st = autoStatusClass(a);
       const dis = !a.enabled;
+      const isHidden = hiddenSet.has(a.id);
       const enc = encodeURIComponent(a.id);
+      const rid = 'autod-' + (did++);
       return `
-        <tr class="${dis ? 'disabled' : ''}">
+        <tr class="expandable ${dis ? 'disabled' : ''}" data-target="${rid}"${isHidden ? ' style="opacity:.55;"' : ''}>
           <td class="dot-cell"><span class="status-dot ${st}" title="${st}"></span></td>
           <td class="acct-account">
-            <div class="a-name">${escapeHtml(a.name)}${dis ? '<span class="disabled-tag">disabled</span>' : ''}</div>
-            ${a.target ? `<div class="a-sub">${escapeHtml(a.target)}</div>` : ''}
+            <div class="a-name"><span class="chev">▸</span> ${escapeHtml(a.name)}${dis ? '<span class="disabled-tag">disabled</span>' : ''}${isHidden ? '<span class="disabled-tag">hidden</span>' : ''}</div>
+            ${a.subtitle || a.target ? `<div class="a-sub">${escapeHtml(a.subtitle || a.target)}</div>` : ''}
           </td>
           <td><span class="kind-badge ${a.kind}">${escapeHtml(a.kind)}</span></td>
           <td class="plain">${escapeHtml(a.schedule || '—')}</td>
@@ -1479,9 +1618,11 @@ async function loadAutomations() {
               <button class="run-btn" data-id="${enc}">Run</button>
               <button class="toggle-btn" data-id="${enc}" data-enabled="${a.enabled}">${a.enabled ? 'Disable' : 'Enable'}</button>
               <button class="logs-btn" data-id="${enc}" data-name="${encodeURIComponent(a.name)}">Logs</button>
+              <button class="hide-btn" data-id="${enc}" data-hidden="${isHidden}">${isHidden ? 'Show' : 'Hide'}</button>
             </div>
           </td>
-        </tr>`;
+        </tr>
+        <tr class="detail-row" id="${rid}"><td colspan="7">${autoDetailHtml(a)}</td></tr>`;
     }).join('');
 
     list.innerHTML =
@@ -1491,12 +1632,30 @@ async function loadAutomations() {
       `<th class="num">Next</th><th class="num">Last</th><th>Actions</th>` +
       `</tr></thead><tbody>${body}</tbody></table></div>`;
 
+    // Row click toggles the detail sub-row — except when a button was clicked.
+    list.querySelectorAll('tr.expandable').forEach(row => {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        const t = document.getElementById(row.dataset.target);
+        if (!t) return;
+        const open = t.classList.toggle('open');
+        row.classList.toggle('open', open);
+      });
+    });
+
+    // Action buttons (present in both the row and the expanded detail).
     list.querySelectorAll('.run-btn').forEach(b =>
-      b.addEventListener('click', () => runAutomation(decodeURIComponent(b.dataset.id))));
+      b.addEventListener('click', (e) => { e.stopPropagation(); runAutomation(decodeURIComponent(b.dataset.id)); }));
     list.querySelectorAll('.toggle-btn').forEach(b =>
-      b.addEventListener('click', () => toggleAutomation(decodeURIComponent(b.dataset.id), b.dataset.enabled !== 'true')));
-    list.querySelectorAll('.logs-btn').forEach(b =>
-      b.addEventListener('click', () => openLogs(decodeURIComponent(b.dataset.id), decodeURIComponent(b.dataset.name))));
+      b.addEventListener('click', (e) => { e.stopPropagation(); toggleAutomation(decodeURIComponent(b.dataset.id), b.dataset.enabled !== 'true'); }));
+    list.querySelectorAll('.logs-btn, .logs-inline').forEach(b =>
+      b.addEventListener('click', (e) => { e.stopPropagation(); openLogs(decodeURIComponent(b.dataset.id), decodeURIComponent(b.dataset.name || '')); }));
+    list.querySelectorAll('.hide-btn').forEach(b =>
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = decodeURIComponent(b.dataset.id);
+        if (b.dataset.hidden === 'true') unhideAutomation(id); else hideAutomation(id);
+      }));
   } catch (e) {
     list.innerHTML = '<div class="empty">Failed to load automations.</div>';
   }
@@ -1560,6 +1719,11 @@ async function openLogs(id, name) {
     body.textContent = 'Failed to load logs.';
   }
 }
+
+document.getElementById('auto-hidden-toggle').addEventListener('click', () => {
+  autoShowHidden = !autoShowHidden;
+  loadAutomations();
+});
 
 document.getElementById('logs-close').addEventListener('click', () => {
   document.getElementById('logs-backdrop').classList.remove('open');

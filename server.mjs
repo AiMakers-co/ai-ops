@@ -1977,6 +1977,21 @@ function commandTarget(command) {
   return path.basename(first) || first;
 }
 
+// Derive a clean, scannable name for a cron row. Prefer a short prose "# name"
+// annotation, but strip trailing detail (everything after the first em/en-dash,
+// colon, comma or pipe — e.g. "X Growth Agent — 10x/day, Thailand…" -> "X Growth
+// Agent") and truncate to ~40 chars. Fall back to the script basename.
+function cleanCronName(comment, command) {
+  if (comment && comment.trim()) {
+    let n = comment.trim().replace(/^#+\s*/, '');
+    // Cut at the first "detail" separator so the name stays a name, not a blurb.
+    n = n.split(/\s*[—–:|]\s*|\s+[-]\s+|,\s+/)[0].trim();
+    if (n.length > 40) n = n.slice(0, 40).replace(/\s+\S*$/, '').trim() + '…';
+    if (n) return n;
+  }
+  return commandTarget(command);
+}
+
 // Build the crontab slice of the automations list. Handles disabled
 // (commented-out) schedule lines and prose "# name" annotations. Never throws.
 async function buildCronAutomations() {
@@ -2004,7 +2019,9 @@ async function buildCronAutomations() {
     if (!parsed) continue;
     const { min, hour, dom, mon, dow, command } = parsed;
 
-    const name = pendingComment || commandTarget(command);
+    const target = commandTarget(command);
+    const name = cleanCronName(pendingComment, command);
+    const fullComment = pendingComment && pendingComment.trim() ? pendingComment.trim() : null;
     pendingComment = null;
 
     const logPath = extractLogPath(command);
@@ -2018,16 +2035,20 @@ async function buildCronAutomations() {
       id,
       kind: 'cron',
       name,
+      subtitle: target,       // script/program basename — scannable secondary label
       schedule: humanCron(min, hour, dom, mon, dow),
-      target: commandTarget(command),
+      rawSchedule: scheduleStr, // the raw 5-field cron expression
+      target,
       status: 'idle',
       enabled,
+      disabled: !enabled,     // true if the schedule line is commented-out
       lastExit: null,
       lastRun,
       nextRun: enabled ? nextFireFromSets(cronSets(min, hour, dom, mon, dow), Date.now()) : null,
       logPath,
-      command,        // user's own crontab command — used by run-now
-      rawLine: line,  // exact source line — used by toggle
+      command,        // full user command string — used by run-now + detail view
+      fullComment,    // the complete "# ..." annotation (may be long) for detail
+      rawLine: line,  // exact source crontab line — used by toggle + detail view
     });
   }
   return out;
@@ -2143,8 +2164,28 @@ async function buildLaunchdAutomations() {
     else status = 'idle';
 
     let schedule = '(on demand)', nextRun = null, target = label, logPath = null;
+    let programArguments = [], workingDir = null, stdout = null, stderr = null;
+    let rawSchedule = null, runAtLoad = null, keepAlive = null, envVars = null, command = null;
     if (plist) {
-      logPath = plist.StandardOutPath || plist.StandardErrorPath || null;
+      programArguments = Array.isArray(plist.ProgramArguments)
+        ? plist.ProgramArguments
+        : (plist.Program ? [plist.Program] : []);
+      command = programArguments.length ? programArguments.join(' ') : (plist.Program || null);
+      workingDir = plist.WorkingDirectory || null;
+      stdout = plist.StandardOutPath || null;
+      stderr = plist.StandardErrorPath || null;
+      logPath = stdout || stderr || null;
+      runAtLoad = plist.RunAtLoad != null ? plist.RunAtLoad : null;
+      keepAlive = plist.KeepAlive != null ? plist.KeepAlive : null;
+      // Raw schedule: interval seconds, or the calendar-interval array/dict.
+      if (typeof plist.StartInterval === 'number') rawSchedule = { StartInterval: plist.StartInterval };
+      else if (plist.StartCalendarInterval) rawSchedule = { StartCalendarInterval: plist.StartCalendarInterval };
+      else if (plist.RunAtLoad) rawSchedule = { RunAtLoad: true };
+      // Env is rare in these plists; on the owner's own machine we surface it
+      // (consistent with the MCP view) rather than hide it.
+      if (plist.EnvironmentVariables && typeof plist.EnvironmentVariables === 'object') {
+        envVars = plist.EnvironmentVariables;
+      }
       target = launchdTarget(plist) || label;
       const s = launchdSchedule(plist);
       schedule = s.human; nextRun = s.nextRun;
@@ -2155,15 +2196,29 @@ async function buildLaunchdAutomations() {
     out.push({
       id: 'launchd:' + label,
       kind: 'launchd',
-      name: label,
+      name: label,           // the launchd label is the clean canonical name
+      subtitle: target,      // resolved script/program basename
       schedule,
+      rawSchedule,           // { StartInterval } | { StartCalendarInterval } | { RunAtLoad }
       target,
       status,
       enabled: true,
+      disabled: false,
       lastExit,
+      pid,
+      statusLine: `${pidStr}\t${exitStr}\t${label}`, // raw `launchctl list` line
       lastRun,
       nextRun,
       logPath,
+      plistPath,
+      programArguments,      // full ProgramArguments array
+      command,               // programArguments joined into one string
+      workingDir,
+      stdout,
+      stderr,
+      runAtLoad,
+      keepAlive,
+      envVars,               // EnvironmentVariables dict if present, else null
       label,
     });
   }
