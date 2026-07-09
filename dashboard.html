@@ -52,19 +52,22 @@
     position: sticky; top: 0; z-index: 5;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
-    padding: 14px 24px;
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 12px 24px;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
   }
   .brand-mark {
-    display: flex; align-items: center; gap: 9px; margin-right: 8px;
+    display: flex; align-items: center; gap: 11px;
+    padding-right: 18px; border-right: 1px solid var(--border);
   }
-  .brand-mark svg { width: 26px; height: 26px; flex-shrink: 0; }
-  header h1 {
-    font-size: 16px; font-weight: 800; margin: 0;
-    letter-spacing: -0.01em; color: var(--text);
+  .brand-mark svg { width: 32px; height: 32px; flex-shrink: 0; }
+  .wordmark { display: flex; flex-direction: column; line-height: 1.1; }
+  .wm-title { font-size: 17px; font-weight: 800; letter-spacing: -0.01em; color: var(--text); }
+  .wm-sub {
+    font-size: 10px; font-weight: 600; color: var(--text-faint);
+    text-transform: uppercase; letter-spacing: 0.09em; margin-top: 2px;
   }
-  .brand-sub { font-size: 12.5px; font-weight: 400; color: var(--text-mute); }
-  header .count { color: var(--text-mute); font-size: 12px; margin-right: auto; }
+  .header-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+  .global-updated { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; }
   input, select, button {
     background: var(--panel-2);
     border: 1px solid var(--border);
@@ -156,7 +159,7 @@
   .toast.show { opacity: 1; }
 
   /* nav tabs */
-  .tabs { display: flex; gap: 2px; margin-right: auto; }
+  .tabs { display: flex; gap: 2px; }
   .tab-btn {
     background: transparent; border: none; border-bottom: 2px solid transparent;
     color: var(--text-mute); font-size: 13px; font-weight: 500;
@@ -167,7 +170,26 @@
   .tab-btn.active:hover { border-bottom-color: var(--accent); }
 
   /* views */
-  #accounts-view, #automations-view, #mcp-view, #skills-view { display: none; }
+  #accounts-view, #automations-view, #mcp-view, #skills-view, #sessions-view { display: none; }
+
+  /* footer shell (all tabs) */
+  footer {
+    background: var(--panel); border-top: 1px solid var(--border);
+    padding: 20px 24px; margin-top: 32px;
+  }
+  .footer-inner {
+    max-width: 1100px; margin: 0 auto;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .footer-brand {
+    display: flex; align-items: center; gap: 9px;
+    font-size: 12.5px; font-weight: 600; color: var(--text-mute);
+  }
+  .footer-brand svg { width: 20px; height: 20px; flex-shrink: 0; }
+  .footer-links { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-left: auto; }
+  .footer-links a { color: var(--accent); text-decoration: none; font-size: 12.5px; font-weight: 500; }
+  .footer-links a:hover { text-decoration: underline; }
+  .footer-tag { flex-basis: 100%; font-size: 11.5px; color: var(--text-faint); margin: 2px 0 0; }
 
   /* accounts view */
   #accounts-bar {
@@ -310,7 +332,39 @@
   .active-cell .inactive-dash { color: var(--text-faint); }
   .actions-cell { white-space: nowrap; }
   .actions-cell .make-active-btn { margin-right: 4px; }
-  .actions-cell .acct-active-lbl { font-size: 11px; color: var(--text-faint); }
+  .actions-cell .acct-active-lbl { font-size: 11px; color: var(--text-faint); margin-right: 6px; }
+
+  /* ---- shared table helpers (reused by every tab) ---- */
+  .provider-pill.user { background: var(--accent-soft); color: var(--accent); }
+  .provider-pill.project { background: var(--codex-soft); color: var(--codex); }
+  .acct-table td.dot-cell { text-align: center; width: 46px; }
+  .acct-table tr.disabled td { opacity: 0.5; }
+  .acct-table td .a-name .disabled-tag,
+  .acct-table td .a-name .kind-badge { margin-left: 6px; vertical-align: middle; }
+  .tbl-actions { display: flex; gap: 6px; white-space: nowrap; }
+  .tbl-actions button { font-size: 11.5px; padding: 5px 9px; background: transparent; }
+  .tbl-actions .run-btn { color: var(--accent); border-color: var(--accent-soft); }
+  .tbl-actions .run-btn:hover { background: var(--accent-soft); }
+  .tbl-actions .toggle-btn, .tbl-actions .logs-btn { color: var(--text-mute); }
+  .acct-table td.plain { color: var(--text-mute); white-space: nowrap; }
+  .acct-table td.mono {
+    font-family: "Courier New", monospace; font-size: 11px; color: var(--text-mute);
+    max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .acct-table td.desc-cell { color: var(--text-mute); font-size: 12px; line-height: 1.45; max-width: 660px; }
+  .acct-table tbody tr[data-id] { cursor: pointer; }
+  .acct-table tr.expandable { cursor: pointer; }
+  .acct-table tr.expandable .chev {
+    display: inline-block; width: 12px; color: var(--text-faint); font-size: 10px;
+  }
+  .acct-table tr.expandable.open .chev { color: var(--accent); }
+  .details-btn { font-size: 11.5px; padding: 5px 9px; background: transparent; color: var(--text-mute); }
+  .acct-table tr.detail-row { display: none; }
+  .acct-table tr.detail-row.open { display: table-row; }
+  .acct-table tr.detail-row > td {
+    padding: 6px 14px 14px 40px; background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+  }
 
   .add-account-btn.codex { color: #fff; background: var(--codex); border-color: var(--codex); }
   .add-account-btn.codex:hover { opacity: 0.9; border-color: var(--codex); }
@@ -494,14 +548,16 @@
   <div class="brand-mark">
     <svg viewBox="0 0 64 64" aria-hidden="true">
       <g transform="translate(32,32) rotate(45)">
-        <rect x="-17" y="-17" width="15" height="15" fill="#EF4444" rx="2.1"/>
-        <rect x="2" y="-17" width="15" height="15" fill="#F97316" rx="2.1"/>
-        <rect x="-17" y="2" width="15" height="15" fill="#22C55E" rx="2.1"/>
-        <rect x="2" y="2" width="15" height="15" fill="#3B82F6" rx="2.1"/>
+        <rect x="-18" y="-18" width="18" height="18" rx="3" fill="#ef4444"/>
+        <rect x="0" y="-18" width="18" height="18" rx="3" fill="#f97316"/>
+        <rect x="-18" y="0" width="18" height="18" rx="3" fill="#22c55e"/>
+        <rect x="0" y="0" width="18" height="18" rx="3" fill="#3b82f6"/>
       </g>
     </svg>
-    <h1>AI Makers</h1>
-    <span class="brand-sub">· AI Ops</span>
+    <div class="wordmark">
+      <span class="wm-title">AI Ops</span>
+      <span class="wm-sub">by AI Makers</span>
+    </div>
   </div>
   <div class="tabs">
     <button class="tab-btn" data-tab="accounts">Accounts</button>
@@ -510,16 +566,10 @@
     <button class="tab-btn" data-tab="skills">Skills</button>
     <button class="tab-btn" data-tab="recents">Recents</button>
   </div>
-  <span class="count" id="count"></span>
-  <input type="search" id="search" placeholder="Search title, prompt, project…" />
-  <select id="project"><option value="">All projects</option></select>
-  <select id="sort">
-    <option value="last">Last active</option>
-    <option value="first">Started</option>
-    <option value="msgs">Message count</option>
-    <option value="size">Size</option>
-  </select>
-  <button id="refresh">Refresh</button>
+  <div class="header-right">
+    <span class="global-updated" id="global-updated"></span>
+    <button id="refresh">Refresh</button>
+  </div>
 </header>
 
 <main>
@@ -528,7 +578,6 @@
     <div id="accounts-bar">
       <button class="add-account-btn" id="add-account-open-btn">＋ Add Claude account</button>
       <button class="add-account-btn codex" id="add-codex-open-btn">＋ Add Codex account</button>
-      <span class="last-updated" id="accounts-updated"></span>
     </div>
     <div class="hint">First run may prompt macOS Keychain access — click "Always Allow" for each account.</div>
 
@@ -592,7 +641,7 @@
     <div class="view-bar">
       <span class="summary" id="auto-summary"></span>
     </div>
-    <div class="auto-list" id="auto-list"></div>
+    <div id="auto-list"></div>
   </div>
 
   <!-- MCP -->
@@ -615,9 +664,44 @@
 
   <!-- Recents (sessions) -->
   <div id="sessions-view">
+    <div class="view-bar">
+      <input type="search" id="search" placeholder="Search title, prompt, project…" />
+      <select id="project"><option value="">All projects</option></select>
+      <select id="sort">
+        <option value="last">Last active</option>
+        <option value="first">Started</option>
+        <option value="msgs">Message count</option>
+        <option value="size">Size</option>
+      </select>
+      <span class="summary" id="count"></span>
+    </div>
     <div id="list"></div>
   </div>
 </main>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <g transform="translate(32,32) rotate(45)">
+          <rect x="-18" y="-18" width="18" height="18" rx="3" fill="#ef4444"/>
+          <rect x="0" y="-18" width="18" height="18" rx="3" fill="#f97316"/>
+          <rect x="-18" y="0" width="18" height="18" rx="3" fill="#22c55e"/>
+          <rect x="0" y="0" width="18" height="18" rx="3" fill="#3b82f6"/>
+        </g>
+      </svg>
+      <span>AI Ops — built by AI Makers</span>
+    </div>
+    <div class="footer-links">
+      <a href="https://aimakers.co" target="_blank" rel="noopener">Website</a>
+      <a href="mailto:mark@aimakers.co" target="_blank" rel="noopener">Email</a>
+      <a href="https://x.com/AustenMakers" target="_blank" rel="noopener">X</a>
+      <a href="https://github.com/AiMakers-co/ai-ops" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://wa.me/31627597658" target="_blank" rel="noopener">WhatsApp</a>
+    </div>
+    <p class="footer-tag">Multi-provider AI usage, accounts, automations, MCP &amp; skills — local, on your machine.</p>
+  </div>
+</footer>
 
 <div id="modal-backdrop">
   <div id="modal">
@@ -705,7 +789,10 @@ const loaded = { accounts: false, automations: false, mcp: false, skills: false,
 let activeTab = localStorage.getItem('dashTab');
 if (!TABS.includes(activeTab)) activeTab = 'accounts';
 
-const SESSION_CONTROLS = ['search', 'project', 'sort'];
+function setUpdated() {
+  const el = document.getElementById('global-updated');
+  if (el) el.textContent = 'Updated ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
 
 function showTab(tab) {
   if (!TABS.includes(tab)) tab = 'accounts';
@@ -723,11 +810,6 @@ function showTab(tab) {
   Object.entries(views).forEach(([t, id]) => {
     document.getElementById(id).style.display = (t === tab) ? 'block' : 'none';
   });
-
-  // session controls + count only relevant on Recents
-  const showSess = tab === 'recents';
-  SESSION_CONTROLS.forEach(id => document.getElementById(id).style.display = showSess ? '' : 'none');
-  document.getElementById('count').style.display = showSess ? '' : 'none';
 
   loadTab(tab, false);
 }
@@ -751,6 +833,7 @@ async function loadSessions() {
   const res = await fetch('/api/sessions');
   sessions = await res.json();
   loaded.recents = true;
+  setUpdated();
   populateProjects();
   render();
 }
@@ -784,27 +867,37 @@ function render() {
     return (b.lastTimestamp || '').localeCompare(a.lastTimestamp || '');
   });
 
-  document.getElementById('count').textContent = `${filtered.length} of ${sessions.length}`;
+  document.getElementById('count').innerHTML = `<b>${filtered.length}</b> of ${sessions.length} sessions`;
 
   const list = document.getElementById('list');
-  if (!filtered.length) {
-    list.innerHTML = '<div class="empty">No sessions match.</div>';
-    return;
-  }
 
-  list.innerHTML = filtered.map(s => `
-    <div class="row" data-id="${encodeURIComponent(s.id)}">
-      <div class="title">
-        <div class="t">${escapeHtml(s.title)}</div>
-        <div class="p">${escapeHtml(shortenPath(s.cwd))}${s.gitBranch ? ' · ' + escapeHtml(s.gitBranch) : ''}</div>
-      </div>
-      <div class="msgs">${s.userCount + s.assistantCount} msgs</div>
-      <div class="meta">${fmtSize(s.size)} · ${fmtRelative(s.lastTimestamp)}</div>
-      <button class="resume-btn" data-resume="${encodeURIComponent(s.id)}">Resume</button>
-    </div>
-  `).join('');
+  const rows = filtered.map(s => {
+    const enc = encodeURIComponent(s.id);
+    return `
+      <tr data-id="${enc}">
+        <td class="acct-account">
+          <div class="a-name">${escapeHtml(s.title)}</div>
+          <div class="a-sub">${s.userCount + s.assistantCount} msgs · ${fmtSize(s.size)}</div>
+        </td>
+        <td class="plain">
+          ${escapeHtml(shortenPath(s.cwd))}
+          ${s.gitBranch ? `<div class="a-sub">${escapeHtml(s.gitBranch)}</div>` : ''}
+        </td>
+        <td class="plain">${fmtRelative(s.lastTimestamp)}</td>
+        <td class="actions-cell"><button class="resume-btn" data-resume="${enc}">Resume</button></td>
+      </tr>`;
+  }).join('');
 
-  list.querySelectorAll('.row').forEach(row => {
+  const body = filtered.length
+    ? rows
+    : '<tr><td colspan="4" class="empty" style="padding:40px 12px;text-align:left;">No sessions match.</td></tr>';
+
+  list.innerHTML =
+    `<div class="acct-table-wrap"><table class="acct-table">` +
+    `<thead><tr><th>Session</th><th>Project</th><th class="num">When</th><th>Actions</th></tr></thead>` +
+    `<tbody>${body}</tbody></table></div>`;
+
+  list.querySelectorAll('tbody tr[data-id]').forEach(row => {
     row.addEventListener('click', (e) => {
       if (e.target.closest('.resume-btn')) return;
       openSession(decodeURIComponent(row.dataset.id));
@@ -964,7 +1057,14 @@ function acctRow(a) {
 
   let actions;
   if (a.isActive) {
-    actions = '<span class="acct-active-lbl">Active</span>';
+    // Codex active accounts can be disconnected; Claude active rows keep no remove.
+    if (provider === 'codex') {
+      actions =
+        '<span class="acct-active-lbl">Active</span>' +
+        `<button class="remove-btn" ${dataAttrs} data-active="1" title="Disconnect Codex account">Remove</button>`;
+    } else {
+      actions = '<span class="acct-active-lbl">Active</span>';
+    }
   } else {
     actions =
       `<button class="make-active-btn" ${dataAttrs}>Make active</button>` +
@@ -994,7 +1094,7 @@ async function loadAccounts() {
     const res = await fetch('/api/accounts');
     const accounts = await res.json();
     loaded.accounts = true;
-    document.getElementById('accounts-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+    setUpdated();
 
     const claude = accounts.filter(a => (a.provider || 'claude') === 'claude');
     const codex = accounts.filter(a => a.provider === 'codex');
@@ -1062,9 +1162,13 @@ async function removeAccount(ds) {
   const provider = ds.provider || 'claude';
   const service = decodeURIComponent(ds.service || '');
   const id = decodeURIComponent(ds.id || '');
-  if (!confirm('Remove this account from the dashboard? This deletes its saved Keychain stash.')) return;
+  const codexActive = provider === 'codex' && ds.active === '1';
+  const msg = codexActive
+    ? "Disconnect this Codex account? You'll need to log in again to re-add it."
+    : 'Remove this account from the dashboard? This deletes its saved Keychain stash.';
+  if (!confirm(msg)) return;
   const body = provider === 'codex' ? { provider: 'codex', id } : { service };
-  showToast('Removing…');
+  showToast(codexActive ? 'Disconnecting…' : 'Removing…');
   try {
     const res = await fetch('/api/accounts/remove', {
       method: 'POST',
@@ -1072,11 +1176,11 @@ async function removeAccount(ds) {
       body: JSON.stringify(body),
     });
     const data = await res.json();
-    if (data.error) { showToast('Remove failed: ' + data.error); return; }
-    showToast('Account removed');
+    if (data.error) { showToast((codexActive ? 'Disconnect' : 'Remove') + ' failed: ' + data.error); return; }
+    showToast(data.disconnected || codexActive ? 'Codex disconnected' : 'Account removed');
     loadAccounts();
   } catch (e) {
-    showToast('Remove failed');
+    showToast(codexActive ? 'Disconnect failed' : 'Remove failed');
   }
 }
 
@@ -1258,35 +1362,41 @@ async function loadAutomations() {
     const failed = items.filter(a => a.lastExit !== 0 && a.lastExit != null).length;
     document.getElementById('auto-summary').innerHTML =
       `<b>${items.length}</b> automations · <b>${running}</b> running · <b>${failed}</b> failed`;
+    setUpdated();
 
     if (!items.length) { list.innerHTML = '<div class="empty">No automations found.</div>'; return; }
 
-    list.innerHTML = items.map(a => {
+    const body = items.map(a => {
       const st = autoStatusClass(a);
       const dis = !a.enabled;
       const enc = encodeURIComponent(a.id);
       return `
-        <div class="auto-row${dis ? ' disabled' : ''}">
-          <div class="status-dot ${st}" title="${st}"></div>
-          <div class="auto-main">
-            <div class="auto-name">
-              ${escapeHtml(a.name)}
-              <span class="kind-badge ${a.kind}">${escapeHtml(a.kind)}</span>
-              ${dis ? '<span class="disabled-tag">disabled</span>' : ''}
+        <tr class="${dis ? 'disabled' : ''}">
+          <td class="dot-cell"><span class="status-dot ${st}" title="${st}"></span></td>
+          <td class="acct-account">
+            <div class="a-name">${escapeHtml(a.name)}${dis ? '<span class="disabled-tag">disabled</span>' : ''}</div>
+            ${a.target ? `<div class="a-sub">${escapeHtml(a.target)}</div>` : ''}
+          </td>
+          <td><span class="kind-badge ${a.kind}">${escapeHtml(a.kind)}</span></td>
+          <td class="plain">${escapeHtml(a.schedule || '—')}</td>
+          <td class="plain">${escapeHtml(fmtRelative(a.nextRun))}</td>
+          <td class="plain">${escapeHtml(fmtRelative(a.lastRun))}</td>
+          <td>
+            <div class="tbl-actions">
+              <button class="run-btn" data-id="${enc}">Run</button>
+              <button class="toggle-btn" data-id="${enc}" data-enabled="${a.enabled}">${a.enabled ? 'Disable' : 'Enable'}</button>
+              <button class="logs-btn" data-id="${enc}" data-name="${encodeURIComponent(a.name)}">Logs</button>
             </div>
-            <div class="auto-sub">${escapeHtml(a.schedule || '')}${a.target ? ' · ' + escapeHtml(a.target) : ''}</div>
-          </div>
-          <div class="auto-times">
-            <div>next: ${escapeHtml(fmtRelative(a.nextRun))}</div>
-            <div>last: ${escapeHtml(fmtRelative(a.lastRun))}</div>
-          </div>
-          <div class="auto-actions">
-            <button class="run-btn" data-id="${enc}">Run now</button>
-            <button class="toggle-btn" data-id="${enc}" data-enabled="${a.enabled}">${a.enabled ? 'Disable' : 'Enable'}</button>
-            <button class="logs-btn" data-id="${enc}" data-name="${encodeURIComponent(a.name)}">Logs</button>
-          </div>
-        </div>`;
+          </td>
+        </tr>`;
     }).join('');
+
+    list.innerHTML =
+      `<div class="acct-table-wrap"><table class="acct-table">` +
+      `<thead><tr>` +
+      `<th class="mid">Status</th><th>Name</th><th>Type</th><th>Schedule</th>` +
+      `<th class="num">Next</th><th class="num">Last</th><th>Actions</th>` +
+      `</tr></thead><tbody>${body}</tbody></table></div>`;
 
     list.querySelectorAll('.run-btn').forEach(b =>
       b.addEventListener('click', () => runAutomation(decodeURIComponent(b.dataset.id))));
@@ -1400,8 +1510,7 @@ function kvRow(label, value) {
   return `<div class="mcp-kv"><span class="k">${escapeHtml(label)}</span><span class="v">${escapeHtml(value)}</span></div>`;
 }
 
-function mcpCard(s) {
-  const tp = (s.transport || '').toLowerCase();
+function mcpDetailHtml(s) {
   let detail = '';
   if (s.command) detail += kvRow('command', s.command);
   if (Array.isArray(s.args) && s.args.length) detail += kvRow('args', s.args.join('  '));
@@ -1420,17 +1529,23 @@ function mcpCard(s) {
     detail += headers.map(([k, v]) => secretRow(k, v)).join('');
   }
   if (!detail) detail = '<div class="mcp-kv"><span class="v" style="color:var(--text-faint)">No additional config.</span></div>';
+  return detail;
+}
 
-  const scope = s.project ? `${s.scope} · ${s.project}` : s.scope;
+function mcpRow(s, gid) {
+  const tp = (s.transport || '').toLowerCase();
+  const scope = s.project ? `${s.scope} · ${s.project}` : (s.scope || '');
+  const target = s.command || s.url || s.type || '—';
+  const did = 'mcpd-' + gid;
   return `
-    <details class="mcp-card">
-      <summary>
-        <span class="mcp-name">${escapeHtml(s.name)}</span>
-        <span class="mcp-scope">${escapeHtml(scope || '')}</span>
-        <span class="transport-badge ${tp}">${escapeHtml(s.transport || '')}</span>
-      </summary>
-      <div class="mcp-detail">${detail}</div>
-    </details>`;
+    <tr class="expandable" data-target="${did}">
+      <td class="acct-account"><div class="a-name"><span class="chev">▸</span> ${escapeHtml(s.name)}</div></td>
+      <td class="plain">${escapeHtml(scope)}</td>
+      <td><span class="transport-badge ${tp}">${escapeHtml(s.transport || '')}</span></td>
+      <td class="mono" title="${escapeHtml(target)}">${escapeHtml(target)}</td>
+      <td><button class="details-btn" data-target="${did}">Details</button></td>
+    </tr>
+    <tr class="detail-row" id="${did}"><td colspan="5">${mcpDetailHtml(s)}</td></tr>`;
 }
 
 function wireSecretRows(root) {
@@ -1468,12 +1583,37 @@ async function loadMCP() {
     const pc = (data.counts && data.counts.project) != null ? data.counts.project : project.length;
     document.getElementById('mcp-summary').innerHTML =
       `<b>${uc}</b> user · <b>${pc}</b> project servers`;
+    setUpdated();
+
+    const grp = (label, pillCls, count) =>
+      `<tr class="grp-sep"><td colspan="5"><div class="grp-label">` +
+      `<span class="provider-pill ${pillCls}">${label}</span>` +
+      `<h2>${label} servers</h2><span class="g-count">${count}</span></div></td></tr>`;
+    const emptyRow = msg => `<tr><td colspan="5" class="empty" style="padding:18px 12px;text-align:left;">${msg}</td></tr>`;
+
+    let gid = 0;
+    const rowsFor = arr => arr.map(s => mcpRow(s, gid++)).join('');
+
+    let body = '';
+    body += grp('User', 'user', uc);
+    body += user.length ? rowsFor(user) : emptyRow('No user servers.');
+    body += grp('Project', 'project', pc);
+    body += project.length ? rowsFor(project) : emptyRow('No project servers.');
 
     wrap.innerHTML =
-      `<div class="group-head"><h2>User servers</h2><span class="g-count">${uc}</span></div>` +
-      `<div class="mcp-grid">${user.map(mcpCard).join('') || '<div class="empty">None</div>'}</div>` +
-      `<div class="group-head"><h2>Project servers</h2><span class="g-count">${pc}</span></div>` +
-      `<div class="mcp-grid">${project.map(mcpCard).join('') || '<div class="empty">None</div>'}</div>`;
+      `<div class="acct-table-wrap"><table class="acct-table">` +
+      `<thead><tr>` +
+      `<th>Server</th><th>Scope</th><th>Transport</th><th>Target</th><th class="mid">Details</th>` +
+      `</tr></thead><tbody>${body}</tbody></table></div>`;
+
+    wrap.querySelectorAll('tr.expandable').forEach(row => {
+      row.addEventListener('click', () => {
+        const t = document.getElementById(row.dataset.target);
+        if (!t) return;
+        const open = t.classList.toggle('open');
+        row.classList.toggle('open', open);
+      });
+    });
 
     wireSecretRows(wrap);
   } catch (e) {
@@ -1505,17 +1645,28 @@ function renderSkills() {
   document.getElementById('skills-summary').innerHTML =
     `<b>${claude.length + codex.length}</b> shown`;
 
-  const card = s => `
-    <div class="skill-card">
-      <div class="sk-name">${escapeHtml(s.name)}</div>
-      <div class="sk-desc">${escapeHtml(s.description || '')}</div>
-    </div>`;
+  const grp = (label, pillCls, count) =>
+    `<tr class="grp-sep"><td colspan="3"><div class="grp-label">` +
+    `<span class="provider-pill ${pillCls}">${label}</span>` +
+    `<h2>${label} skills</h2><span class="g-count">${count}</span></div></td></tr>`;
+  const emptyRow = () => `<tr><td colspan="3" class="empty" style="padding:18px 12px;text-align:left;">No matches</td></tr>`;
+  const rows = (arr, pillCls, pillLabel) => arr.map(s => `
+    <tr>
+      <td><span class="provider-pill ${pillCls}">${pillLabel}</span></td>
+      <td class="acct-account"><div class="a-name">${escapeHtml(s.name)}</div></td>
+      <td class="desc-cell">${escapeHtml(s.description || '')}</td>
+    </tr>`).join('');
+
+  let body = '';
+  body += grp('Claude', 'claude', claude.length);
+  body += claude.length ? rows(claude, 'claude', 'Claude') : emptyRow();
+  body += grp('Codex', 'codex', codex.length);
+  body += codex.length ? rows(codex, 'codex', 'Codex') : emptyRow();
 
   wrap.innerHTML =
-    `<div class="group-head"><span class="provider-pill claude">Claude</span><h2>Claude skills</h2><span class="g-count">${claude.length}</span></div>` +
-    `<div class="skills-grid">${claude.map(card).join('') || '<div class="empty">No matches</div>'}</div>` +
-    `<div class="group-head"><span class="provider-pill codex">Codex</span><h2>Codex skills</h2><span class="g-count">${codex.length}</span></div>` +
-    `<div class="skills-grid">${codex.map(card).join('') || '<div class="empty">No matches</div>'}</div>`;
+    `<div class="acct-table-wrap"><table class="acct-table">` +
+    `<thead><tr><th>Source</th><th>Name</th><th>Description</th></tr></thead>` +
+    `<tbody>${body}</tbody></table></div>`;
 }
 
 async function loadSkills() {
@@ -1526,6 +1677,7 @@ async function loadSkills() {
     const data = await res.json();
     loaded.skills = true;
     allSkills = data.skills || [];
+    setUpdated();
     renderSkills();
   } catch (e) {
     wrap.innerHTML = '<div class="empty">Failed to load skills.</div>';

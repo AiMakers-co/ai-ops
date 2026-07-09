@@ -1542,10 +1542,23 @@ async function removeCodexAccount(id) {
   if (!id || typeof id !== 'string') {
     const err = new Error('id is required'); err.code = 'INVALID'; throw err;
   }
-  // Guard: if this id matches the currently-active account, refuse.
+  // If this id is the currently-active Codex account, removing it means
+  // DISCONNECT: back up ~/.codex/auth.json (so it's recoverable), then delete
+  // the live slot. Unlike Claude's active Keychain slot (the live CLI cred we
+  // protect), a Codex disconnect is a legitimate management action.
   const activeParsed = parseCodexBlob(await readFileSafe(CODEX_AUTH_PATH));
   if (activeParsed && codexStableId(activeParsed) === id) {
-    const err = new Error('cannot remove the active codex account'); err.code = 'INVALID'; throw err;
+    try {
+      const raw = await readFileSafe(CODEX_AUTH_PATH);
+      if (raw) {
+        await fsp.mkdir(CODEX_ACCOUNTS_DIR, { recursive: true });
+        await writeSecretFile(path.join(CODEX_ACCOUNTS_DIR, `removed-${id}.json`), raw);
+      }
+    } catch { /* backup best-effort */ }
+    await fsp.unlink(CODEX_AUTH_PATH).catch(() => {});
+    const registry = await loadCodexRegistry();
+    if (registry[id]) { delete registry[id]; await writeCodexRegistry(registry); }
+    return { removed: id, disconnected: true };
   }
 
   const registry = await loadCodexRegistry();
