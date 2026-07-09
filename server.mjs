@@ -670,6 +670,81 @@ async function tightenCredsPerms() {
   }
 }
 
+// Use a stored refresh token to mint a fresh access token, and persist the
+// rotated pair back to Keychain in the blob's original shape. Refresh tokens
+// are single-use — if we don't save the new one, the account bricks. Returns
+// the updated normalized blob, or null if refresh is impossible/failed. Never
+// logs tokens.
+async function refreshServiceToken(service) {
+  const raw = await readKeychainService(service);
+  const norm = normalizeBlob(raw);
+  if (!norm || !norm.refreshToken) return null;
+
+  let resp;
+  try {
+    resp = await fetch(OAUTH.tokenUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: norm.refreshToken,
+        client_id: OAUTH.clientId,
+      }),
+    });
+  } catch {
+    return null; // network error
+  }
+  if (!resp.ok) {
+    console.log(`[refresh] ${service}: refresh grant failed ${resp.status}`);
+    return null; // e.g. invalid_grant → refresh token truly dead; leave as-is
+  }
+  let tok;
+  try { tok = await resp.json(); } catch { return null; }
+  if (!tok.access_token) return null;
+
+  const newExpiresAt = typeof tok.expires_in === 'number'
+    ? Date.now() + tok.expires_in * 1000
+    : (typeof tok.expires_at === 'number' ? tok.expires_at : Date.now() + 3600 * 1000);
+
+  // Rewrite the blob preserving its original shape — only rotate the token trio.
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  if (parsed && parsed.claudeAiOauth) {
+    let o = parsed.claudeAiOauth;
+    const wasString = typeof o === 'string';
+    if (wasString) { try { o = JSON.parse(o); } catch { o = {}; } }
+    o.accessToken = tok.access_token;
+    o.refreshToken = tok.refresh_token || norm.refreshToken;
+    o.expiresAt = newExpiresAt;
+    parsed.claudeAiOauth = wasString ? JSON.stringify(o) : o;
+  } else if (parsed && parsed.access_token) {
+    parsed.access_token = tok.access_token;
+    parsed.refresh_token = tok.refresh_token || norm.refreshToken;
+    parsed.expires_at = newExpiresAt;
+  } else {
+    parsed = {
+      claudeAiOauth: {
+        accessToken: tok.access_token,
+        refreshToken: tok.refresh_token || norm.refreshToken,
+        expiresAt: newExpiresAt,
+        scopes: norm.scopes,
+        subscriptionType: norm.subscriptionType,
+        rateLimitTier: norm.rateLimitTier,
+      },
+    };
+  }
+
+  const newRaw = JSON.stringify(parsed);
+  try {
+    await writeKeychainService(service, newRaw);
+  } catch {
+    console.log(`[refresh] ${service}: keychain write-back failed`);
+    return null;
+  }
+  console.log(`[refresh] ${service}: access token refreshed`);
+  return normalizeBlob(newRaw);
+}
+
 async function buildAccountsList() {
   await tightenCredsPerms();
 
@@ -690,7 +765,22 @@ async function buildAccountsList() {
   // repeated tokens automatically).
   const results = await Promise.all(
     entries.map(async ({ service, norm }) => {
-      const info = await getAccountInfoCached(service, norm.accessToken);
+      // Proactive: if the access token is expired (or within 60s of it), mint a
+      // fresh one from the refresh token so stored accounts don't go stale.
+      if (norm.refreshToken && norm.expiresAt && norm.expiresAt <= Date.now() + 60_000) {
+        const refreshed = await refreshServiceToken(service);
+        if (refreshed) norm = refreshed;
+      }
+      let info = await getAccountInfoCached(service, norm.accessToken);
+      // Reactive: token looked valid but the API rejected it (401/403) — try one
+      // refresh and re-fetch before giving up and showing "needs refresh".
+      if (info.status === 'needs_refresh' && norm.refreshToken) {
+        const refreshed = await refreshServiceToken(service);
+        if (refreshed) {
+          norm = refreshed;
+          info = await getAccountInfoCached(service, norm.accessToken);
+        }
+      }
       return { service, norm, info };
     })
   );
