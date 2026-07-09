@@ -247,6 +247,84 @@
   .acct-summary { display: flex; gap: 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-faint); }
   .acct-note { font-size: 12px; color: var(--text-faint); font-style: italic; margin-top: 4px; }
   .usage-note { font-size: 12px; color: var(--text-faint); margin: 6px 0 2px; }
+
+  /* accounts table (dense) */
+  .acct-table-wrap {
+    overflow-x: auto; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--panel);
+  }
+  .acct-table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 780px; }
+  .acct-table thead th {
+    text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-faint); font-weight: 700; padding: 9px 12px;
+    border-bottom: 1px solid var(--border); white-space: nowrap; background: var(--panel-2);
+    position: sticky; top: 0;
+  }
+  .acct-table thead th.num { width: 108px; }
+  .acct-table thead th.mid { width: 60px; }
+  .acct-table tbody td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .acct-table tbody tr:last-child td { border-bottom: none; }
+  .acct-table tbody tr:hover td { background: var(--panel-2); }
+  .acct-table tr.needs-refresh td { opacity: 0.66; }
+  .acct-table tr.err td { background: rgba(239,68,68,0.05); }
+  .acct-table tr.codex .plan-badge { background: var(--codex-soft); color: var(--codex); }
+  .acct-table tr.codex .make-active-btn { color: var(--codex); border-color: var(--codex-soft); }
+  .acct-table tr.codex .make-active-btn:hover { background: var(--codex-soft); }
+
+  .grp-sep td { padding: 12px 12px 7px; background: transparent; }
+  .grp-sep .grp-label { display: flex; align-items: center; gap: 9px; }
+  .grp-sep h2 {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+    margin: 0; color: var(--text-mute);
+  }
+  .grp-sep .g-count { font-size: 11px; color: var(--text-faint); }
+
+  .acct-account .a-name {
+    font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; max-width: 230px;
+  }
+  .acct-account .a-sub {
+    font-size: 10.5px; color: var(--text-faint); margin-top: 2px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; max-width: 230px;
+  }
+
+  /* usage cell: percent + thin inline mini-bar */
+  .u-cell { white-space: nowrap; }
+  .u-cell .u-top { display: flex; align-items: baseline; gap: 4px; }
+  .u-cell .u-pct { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 12.5px; }
+  .u-cell .stale-mark { font-size: 10px; color: var(--text-faint); }
+  .u-cell .u-bar { height: 4px; border-radius: 2px; background: var(--panel-2); overflow: hidden; margin-top: 4px; width: 78px; }
+  .u-cell .u-bar > span { display: block; height: 100%; border-radius: 2px; }
+  .u-cell.green .u-bar > span { background: var(--assistant); }
+  .u-cell.amber .u-bar > span { background: var(--accent); }
+  .u-cell.red .u-bar > span { background: var(--danger); }
+  .u-cell.stale { background: rgba(156,145,132,0.10); }
+  .u-cell.stale .u-pct { color: var(--text-mute); }
+  .u-cell.empty { color: var(--text-faint); text-align: left; }
+
+  .active-cell { text-align: center; }
+  .active-cell .active-dot {
+    width: 9px; height: 9px; border-radius: 50%; background: var(--assistant);
+    display: inline-block; box-shadow: 0 0 0 3px rgba(34,197,94,0.15);
+  }
+  .active-cell .inactive-dash { color: var(--text-faint); }
+  .actions-cell { white-space: nowrap; }
+  .actions-cell .make-active-btn { margin-right: 4px; }
+  .actions-cell .acct-active-lbl { font-size: 11px; color: var(--text-faint); }
+
+  .add-account-btn.codex { color: #fff; background: var(--codex); border-color: var(--codex); }
+  .add-account-btn.codex:hover { opacity: 0.9; border-color: var(--codex); }
+
+  #add-codex-panel {
+    margin-bottom: 16px; background: var(--panel); border: 1px solid var(--codex-soft);
+    border-radius: 10px; padding: 16px 18px;
+  }
+  #add-codex-panel .aap-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  #add-codex-panel .aap-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  #add-codex-panel .codex-status { margin-left: 12px; font-size: 12.5px; color: var(--text-mute); }
+  #add-codex-panel details.advanced-import { margin-top: 8px; }
+  #add-codex-panel .add-account-box { border: 1px solid var(--border); border-radius: 8px; }
+
   .add-account-box {
     margin-top: 22px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 16px 18px;
@@ -449,6 +527,7 @@
   <div id="accounts-view">
     <div id="accounts-bar">
       <button class="add-account-btn" id="add-account-open-btn">＋ Add Claude account</button>
+      <button class="add-account-btn codex" id="add-codex-open-btn">＋ Add Codex account</button>
       <span class="last-updated" id="accounts-updated"></span>
     </div>
     <div class="hint">First run may prompt macOS Keychain access — click "Always Allow" for each account.</div>
@@ -463,6 +542,34 @@
         account is added automatically and this panel refreshes when it lands.
         If no tab opened, <a href="#" id="aap-open-link" style="color:var(--accent);">click here</a>.
       </div>
+    </div>
+
+    <div id="add-codex-panel" style="display:none;">
+      <div class="aap-head">
+        <h3>Add Codex account</h3>
+        <button id="codex-cancel">Cancel</button>
+      </div>
+      <div class="aap-hint">
+        Sign in to ChatGPT/Codex in the browser, or import an existing
+        <code>~/.codex/auth.json</code>.
+      </div>
+      <div class="aap-step">
+        <div class="aap-step-label">Recommended</div>
+        <button class="add-account-btn codex" id="codex-login-btn">Log in with browser</button>
+        <span class="codex-status" id="codex-login-status"></span>
+      </div>
+      <details class="advanced-import" id="codex-import-details">
+        <summary>Import instead (this machine, or paste auth.json)</summary>
+        <div class="add-account-box">
+          <div class="row2">
+            <button id="codex-import-active-btn">Import this machine's ~/.codex/auth.json</button>
+          </div>
+          <textarea id="codex-import-json" placeholder='Or paste a codex auth.json blob, e.g. {"OPENAI_API_KEY":null,"tokens":{...}}'></textarea>
+          <div class="row2">
+            <button id="codex-import-json-btn">Import pasted JSON</button>
+          </div>
+        </div>
+      </details>
     </div>
 
     <div id="accounts-groups"></div>
@@ -803,60 +910,81 @@ function usageNote(a) {
   return null;
 }
 
-function renderAccountCard(a) {
-  const provider = a.provider || 'claude';
-  const edge = provider === 'codex' ? 'codex-edge' : 'claude-edge';
-  const provTag = `<span class="prov-tag ${provider}">${provider === 'codex' ? 'Codex' : 'Claude'}</span>`;
-
-  // needs_refresh / token_expired: not switchable — minimal muted card, still visible.
-  if (a.status === 'needs_refresh' || a.status === 'token_expired') {
-    const msg = provider === 'codex'
-      ? 'Session expired — reconnect Codex'
-      : 'Session expired — re-add to refresh';
-    return `
-      <div class="acct-card needs-refresh ${edge}">
-        <div class="acct-head">
-          ${provTag}
-          <div class="acct-email">${escapeHtml(a.label || a.email || a.service)}</div>
-        </div>
-        <div class="acct-service">${escapeHtml(a.service || '')}</div>
-        <div class="acct-note">${escapeHtml(msg)}</div>
-      </div>`;
-  }
-
-  const limits = (a.usage && a.usage.limits) || [];
-  const fiveHour = a.usage && a.usage.five_hour;
-  const sevenDay = a.usage && a.usage.seven_day;
-  const note = a.status === 'error' ? 'Usage unavailable — tap Refresh' : usageNote(a);
-  const displayName = a.email || a.label || a.service;
-  const dataAttrs = `data-provider="${provider}" data-id="${encodeURIComponent(a.id || a.service)}" data-service="${encodeURIComponent(a.service || '')}" data-label="${encodeURIComponent(a.label || displayName)}"`;
-
-  return `
-    <div class="acct-card ${edge}${a.status === 'error' ? ' err' : ''}">
-      <div class="acct-head">
-        ${provTag}
-        <div class="acct-email">${escapeHtml(displayName)}</div>
-        ${a.plan ? `<span class="plan-badge">${escapeHtml(a.plan)}</span>` : ''}
-        ${a.isActive ? '<span class="active-pill">Active</span>' : `<button class="make-active-btn" ${dataAttrs}>Make active</button>`}
-        ${a.isActive ? '' : `<button class="remove-btn" ${dataAttrs} title="Remove account">Remove</button>`}
-      </div>
-      <div class="acct-service">${escapeHtml(a.service || a.id || '')}</div>
-      ${note ? `<div class="usage-note">${escapeHtml(note)}</div>` : limits.map(renderUsageRow).join('')}
-      ${(fiveHour || sevenDay) ? `
-      <div class="acct-summary">
-        ${fiveHour ? `<span>5h: ${Math.round(fiveHour.utilization || 0)}%</span>` : ''}
-        ${sevenDay ? `<span>7d: ${Math.round(sevenDay.utilization || 0)}%</span>` : ''}
-      </div>` : ''}
-    </div>`;
+function fmtAgoMs(ms) {
+  if (!ms) return '';
+  try { return fmtRelative(new Date(ms).toISOString()); } catch (e) { return ''; }
 }
 
-function codexPlaceholderCard() {
+// Map a usage column to the matching entry in usage.limits by label/kind.
+const USAGE_COLS = [
+  { match: l => l.kind === 'session' || l.label === 'Current session' },
+  { match: l => l.kind === 'weekly_all' || l.label === 'All models' },
+  { match: l => l.kind === 'weekly_scoped' || /fable/i.test(l.label || '') },
+];
+
+// One <td> per usage column. Never blank the cell — degrade to a muted "—".
+function usageCell(a, col) {
+  const limits = a.usage && a.usage.limits;
+  if (!limits || !limits.length) {
+    const reason = (a.status === 'needs_refresh' || a.status === 'token_expired')
+      ? 'reconnect'
+      : (a.usageError || a.status === 'error' ? 'usage unavailable' : 'no usage cached');
+    return `<td class="u-cell empty" title="${escapeHtml(reason)}">—</td>`;
+  }
+  const l = limits.find(col.match);
+  if (!l) return `<td class="u-cell empty" title="not reported">—</td>`;
+  const pct = Math.round(l.percent || 0);
+  const color = barColor(pct, l.severity);
+  const stale = !!a.usageStale;
+  const title = stale
+    ? 'as of ' + (fmtAgoMs(a.usageAsOf) || 'earlier')
+    : fmtResetTime(l.resets_at);
   return `
-    <div class="acct-card placeholder codex-edge">
-      <div class="ph-title">＋ Connect Codex</div>
-      <div class="ph-body">Codex support is ready. Connect an account to see plan and usage here — import its credentials via <b>Advanced: paste credential JSON</b> below.</div>
-      <button class="connect-codex-btn" id="connect-codex-btn">Connect Codex</button>
-    </div>`;
+    <td class="u-cell ${color}${stale ? ' stale' : ''}" title="${escapeHtml(title || '')}">
+      <div class="u-top"><span class="u-pct">${pct}%</span>${stale ? '<span class="stale-mark">∗</span>' : ''}</div>
+      <div class="u-bar"><span style="width:${Math.min(100, pct)}%"></span></div>
+    </td>`;
+}
+
+function acctRow(a) {
+  const provider = a.provider || 'claude';
+  const provPill = `<span class="provider-pill ${provider}">${provider === 'codex' ? 'Codex' : 'Claude'}</span>`;
+  const name = provider === 'codex' ? (a.label || a.id || a.service) : (a.email || a.label || a.service);
+  const sub = (a.service && a.service !== name) ? a.service : (a.id || '');
+  const dataAttrs = `data-provider="${provider}" data-id="${encodeURIComponent(a.id || a.service || '')}" data-service="${encodeURIComponent(a.service || '')}" data-label="${encodeURIComponent(a.label || name || '')}"`;
+  const rowCls = [
+    provider,
+    (a.status === 'needs_refresh' || a.status === 'token_expired') ? 'needs-refresh' : '',
+    a.status === 'error' ? 'err' : '',
+  ].filter(Boolean).join(' ');
+
+  const active = a.isActive
+    ? '<span class="active-dot" title="Active account"></span>'
+    : '<span class="inactive-dash">·</span>';
+
+  let actions;
+  if (a.isActive) {
+    actions = '<span class="acct-active-lbl">Active</span>';
+  } else {
+    actions =
+      `<button class="make-active-btn" ${dataAttrs}>Make active</button>` +
+      `<button class="remove-btn" ${dataAttrs} title="Remove account">Remove</button>`;
+  }
+
+  return `
+    <tr class="${rowCls}">
+      <td>${provPill}</td>
+      <td class="acct-account">
+        <div class="a-name">${escapeHtml(name || '—')}</div>
+        ${sub ? `<div class="a-sub">${escapeHtml(sub)}</div>` : ''}
+      </td>
+      <td class="plan-cell">${a.plan ? `<span class="plan-badge">${escapeHtml(a.plan)}</span>` : '<span class="a-sub">—</span>'}</td>
+      ${usageCell(a, USAGE_COLS[0])}
+      ${usageCell(a, USAGE_COLS[1])}
+      ${usageCell(a, USAGE_COLS[2])}
+      <td class="active-cell">${active}</td>
+      <td class="actions-cell">${actions}</td>
+    </tr>`;
 }
 
 async function loadAccounts() {
@@ -871,30 +999,31 @@ async function loadAccounts() {
     const claude = accounts.filter(a => (a.provider || 'claude') === 'claude');
     const codex = accounts.filter(a => a.provider === 'codex');
 
-    let html = '';
-    // Claude group
-    html += `<div class="group-head"><span class="provider-pill claude">Claude</span><h2>Claude accounts</h2><span class="g-count">${claude.length}</span></div>`;
-    html += claude.length
-      ? `<div class="accounts-grid">${claude.map(renderAccountCard).join('')}</div>`
-      : '<div class="empty">No Claude accounts found.</div>';
+    const grp = (label, pillCls, count) =>
+      `<tr class="grp-sep"><td colspan="8"><div class="grp-label">` +
+      `<span class="provider-pill ${pillCls}">${label}</span>` +
+      `<h2>${label} accounts</h2><span class="g-count">${count}</span></div></td></tr>`;
+    const emptyRow = msg => `<tr><td colspan="8" class="empty" style="padding:18px 12px;text-align:left;">${msg}</td></tr>`;
 
-    // Codex group
-    html += `<div class="group-head"><span class="provider-pill codex">Codex</span><h2>Codex accounts</h2><span class="g-count">${codex.length}</span></div>`;
-    html += `<div class="accounts-grid">${codex.length ? codex.map(renderAccountCard).join('') : codexPlaceholderCard()}</div>`;
+    let body = '';
+    body += grp('Claude', 'claude', claude.length);
+    body += claude.length ? claude.map(acctRow).join('') : emptyRow('No Claude accounts found.');
+    body += grp('Codex', 'codex', codex.length);
+    body += codex.length ? codex.map(acctRow).join('') : emptyRow('No Codex accounts yet — use ＋ Add Codex account above.');
 
-    wrap.innerHTML = html;
+    wrap.innerHTML =
+      `<div class="acct-table-wrap"><table class="acct-table">` +
+      `<thead><tr>` +
+      `<th>Provider</th><th>Account</th><th>Plan</th>` +
+      `<th class="num">Session</th><th class="num">All models</th><th class="num">Fable</th>` +
+      `<th class="mid">Active</th><th>Actions</th>` +
+      `</tr></thead><tbody>${body}</tbody></table></div>`;
 
     wrap.querySelectorAll('.make-active-btn').forEach(btn => {
       btn.addEventListener('click', () => makeActive(btn.dataset));
     });
     wrap.querySelectorAll('.remove-btn').forEach(btn => {
       btn.addEventListener('click', () => removeAccount(btn.dataset));
-    });
-    const cc = document.getElementById('connect-codex-btn');
-    if (cc) cc.addEventListener('click', () => {
-      const d = document.querySelector('details.advanced-import');
-      if (d) { d.open = true; d.scrollIntoView({ behavior: 'smooth' }); }
-      showToast('Paste Codex credential JSON to connect');
     });
   } catch (e) {
     wrap.innerHTML = '<div class="empty">Failed to load accounts.</div>';
@@ -962,6 +1091,7 @@ function closeAddAccountPanel() {
 
 async function startLogin() {
   showToast('Opening browser…');
+  if (typeof closeCodexPanel === 'function') closeCodexPanel();
   try {
     const res = await fetch('/api/accounts/login-start', { method: 'POST' });
     const data = await res.json();
@@ -1020,6 +1150,93 @@ async function importAccount() {
     showToast('Import failed');
   }
 }
+
+// ---------- Codex add-account flow (login + import) ----------
+let codexPoll = null;
+
+function openCodexPanel() {
+  closeAddAccountPanel(); // don't run both at once
+  const p = document.getElementById('add-codex-panel');
+  p.style.display = 'block';
+  document.getElementById('codex-login-status').textContent = '';
+  p.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeCodexPanel() {
+  document.getElementById('add-codex-panel').style.display = 'none';
+  document.getElementById('codex-login-status').textContent = '';
+  if (codexPoll) { clearInterval(codexPoll); codexPoll = null; }
+}
+
+async function startCodexLogin() {
+  showToast('Opening browser…');
+  const statusEl = document.getElementById('codex-login-status');
+  try {
+    const res = await fetch('/api/accounts/codex-login-start', { method: 'POST' });
+    if (!res.ok) { statusEl.textContent = ''; showToast('Could not start Codex login (' + res.status + ')'); return; }
+    const data = await res.json().catch(() => ({}));
+    if (data && data.error) { showToast('Could not start Codex login: ' + data.error); return; }
+    statusEl.textContent = 'Waiting for browser sign-in…';
+    if (codexPoll) clearInterval(codexPoll);
+    codexPoll = setInterval(pollCodexStatus, 1500);
+  } catch (e) {
+    statusEl.textContent = '';
+    showToast('Could not start Codex login');
+  }
+}
+
+async function pollCodexStatus() {
+  try {
+    const res = await fetch('/api/accounts/codex-login-status');
+    if (!res.ok) return; // transient / endpoint not ready
+    const data = await res.json();
+    if (data.status === 'done') {
+      closeCodexPanel();
+      showToast('Added ' + (data.email || data.label || 'Codex account'));
+      loadAccounts();
+    } else if (data.status === 'error') {
+      if (codexPoll) { clearInterval(codexPoll); codexPoll = null; }
+      document.getElementById('codex-login-status').textContent = '';
+      showToast('Codex login failed: ' + (data.error || 'unknown error'));
+    } else if (data.status === 'idle') {
+      closeCodexPanel();
+    }
+  } catch (e) { /* transient */ }
+}
+
+async function codexImport(payload) {
+  showToast('Importing…');
+  try {
+    const res = await fetch('/api/accounts/codex-import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) { showToast('Codex import failed (' + res.status + ')'); return; }
+    const data = await res.json().catch(() => ({}));
+    if (data && data.error) { showToast('Codex import failed: ' + data.error); return; }
+    const jsonEl = document.getElementById('codex-import-json');
+    if (jsonEl) jsonEl.value = '';
+    closeCodexPanel();
+    showToast('Codex account imported');
+    loadAccounts();
+  } catch (e) {
+    showToast('Codex import failed');
+  }
+}
+
+document.getElementById('add-codex-open-btn').addEventListener('click', () => {
+  const p = document.getElementById('add-codex-panel');
+  if (p.style.display !== 'none') closeCodexPanel(); else openCodexPanel();
+});
+document.getElementById('codex-cancel').addEventListener('click', closeCodexPanel);
+document.getElementById('codex-login-btn').addEventListener('click', startCodexLogin);
+document.getElementById('codex-import-active-btn').addEventListener('click', () => codexImport({ importActive: true }));
+document.getElementById('codex-import-json-btn').addEventListener('click', () => {
+  const j = document.getElementById('codex-import-json').value.trim();
+  if (!j) return showToast('Paste a codex auth.json blob first');
+  codexImport({ json: j });
+});
 
 // ============================ AUTOMATIONS ============================
 function autoStatusClass(a) {

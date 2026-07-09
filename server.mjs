@@ -40,10 +40,27 @@ const CODEX_AUTH_PATH = path.join(CODEX_DIR, 'auth.json');
 const CODEX_ACCOUNTS_DIR = path.join(CODEX_DIR, 'accounts');
 const CODEX_REGISTRY_PATH = path.join(CODEX_DIR, 'accounts-registry.json');
 // OpenAI OAuth (Codex CLI client). client_id is the `aud` of the codex id_token.
+// All params below are VERIFIED from the open-source Codex CLI Rust login server
+// (codex-rs/login/src/server.rs + pkce.rs) — do not change without re-checking source.
+//   - issuer/authorize:  https://auth.openai.com/oauth/authorize   (DEFAULT_ISSUER)
+//   - token:             https://auth.openai.com/oauth/token
+//   - loopback port:     1455 (DEFAULT_PORT), fallback 1457 (FALLBACK_PORT)
+//   - redirect_uri:      http://localhost:<port>/auth/callback
+//   - PKCE:              verifier = 64 random bytes URL-safe-base64 no-pad;
+//                        challenge = base64url(sha256(verifier)); method S256
+//                        (identical to Claude's makePkce — reused directly)
 const CODEX_OAUTH = {
+  authorizeUrl: 'https://auth.openai.com/oauth/authorize',
   tokenUrl: 'https://auth.openai.com/oauth/token',
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
+  scope: 'openid profile email offline_access api.connectors.read api.connectors.invoke',
+  loopbackPort: 1455,
+  fallbackPort: 1457,
+  callbackPath: '/auth/callback',
+  originator: 'codex_cli_rs',
 };
+// OpenAI's auth-claims namespace inside a Codex JWT (id_token / access_token).
+const CODEX_AUTH_CLAIM = 'https://api.openai.com/auth';
 
 // ---------- indexing ----------
 
@@ -593,7 +610,10 @@ const ANTHROPIC_HEADERS_BASE = {
 // account is at its usage limit. A genuinely maxed account returns 200 with
 // percent=100 bars. So 429 => "usage temporarily unavailable", never "at limit".
 async function fetchUsageWithRetry(headers) {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // The /usage endpoint throttles intermittently under load (the active account
+  // 429s often but 200s if you retry). Up to 3 attempts with increasing backoff.
+  const backoffs = [700, 1500];
+  for (let attempt = 0; attempt < 3; attempt++) {
     let res;
     try {
       res = await fetch('https://api.anthropic.com/api/oauth/usage', { headers });
@@ -601,13 +621,37 @@ async function fetchUsageWithRetry(headers) {
       return { ok: false, status: 0 };
     }
     if (res.ok) return { ok: true, json: await res.json() };
-    if (res.status === 429 && attempt === 0) {
-      await new Promise((r) => setTimeout(r, 1200)); // brief backoff, then retry
+    if (res.status === 429 && attempt < backoffs.length) {
+      await new Promise((r) => setTimeout(r, backoffs[attempt]));
       continue;
     }
     return { ok: false, status: res.status };
   }
   return { ok: false, status: 429 };
+}
+
+// Last successfully-fetched usage per account (keyed by stable email). When a
+// fresh /usage fetch fails (429 throttle), we fall back to this so the account —
+// especially the ACTIVE one under load — shows its last-known bars with a
+// "stale" marker instead of blanking to "Usage unavailable".
+const lastGoodUsage = new Map(); // email -> { usage, ts }
+const USAGE_CACHE_FILE = path.join(CACHE_DIR, 'usage-cache.json');
+
+// Persist last-good usage to disk so a heavily-throttled account (esp. the
+// active one) still shows its last-known bars immediately after a restart,
+// rather than blanking until it wins a race with the throttled /usage endpoint.
+function saveUsageCache() {
+  fsp.mkdir(CACHE_DIR, { recursive: true })
+    .then(() => fsp.writeFile(USAGE_CACHE_FILE, JSON.stringify([...lastGoodUsage])))
+    .catch(() => {}); // fire-and-forget; not critical
+}
+async function loadUsageCache() {
+  try {
+    const raw = await fsp.readFile(USAGE_CACHE_FILE, 'utf8');
+    for (const [email, v] of JSON.parse(raw)) {
+      if (email && v && v.usage) lastGoodUsage.set(email, v);
+    }
+  } catch { /* no cache yet */ }
 }
 
 async function fetchProfileAndUsage(accessToken) {
@@ -630,9 +674,12 @@ async function fetchProfileAndUsage(accessToken) {
 
   // Usage is best-effort with a retry. If we still can't fetch it, degrade
   // (status stays 'ok') and mark usageUnavailable — NOT "at limit".
+  const email = profile.account?.email || null;
   const usageResult = await fetchUsageWithRetry(headers);
   let usage = null;
   let usageError = null;
+  let usageStale = false;
+  let usageAsOf = null;
   if (usageResult.ok) {
     const u = usageResult.json;
     const limits = (u.limits || []).map((l) => {
@@ -643,20 +690,31 @@ async function fetchProfileAndUsage(accessToken) {
       return { ...l, label };
     });
     usage = { limits, five_hour: u.five_hour || null, seven_day: u.seven_day || null };
+    if (email) { lastGoodUsage.set(email, { usage, ts: Date.now() }); saveUsageCache(); }
   } else {
-    // Endpoint threw/throttled — usage unknown, NOT at limit.
-    usageError = String(usageResult.status);
+    // Endpoint threw/throttled — fall back to the last-known usage so the
+    // account still shows its bars (marked stale), NOT a blank "unavailable".
+    const cached = email ? lastGoodUsage.get(email) : null;
+    if (cached) {
+      usage = cached.usage;
+      usageStale = true;
+      usageAsOf = cached.ts;
+    } else {
+      usageError = String(usageResult.status);
+    }
   }
 
   return {
     status: 'ok',
-    email: profile.account?.email || null,
+    email,
     fullName: profile.account?.full_name || null,
     hasMax: !!profile.account?.has_claude_max,
     hasPro: !!profile.account?.has_claude_pro,
     plan: planLabel(profile.organization?.rate_limit_tier),
     usage,
     usageError,
+    usageStale,
+    usageAsOf,
   };
 }
 
@@ -840,8 +898,9 @@ async function buildAccountsList() {
       status: info.status,
     };
     if (info.status === 'ok') {
-      base.usage = info.usage;               // may be null when usage was rate-limited
-      if (info.usageError) base.usageError = info.usageError; // e.g. "429" = at limit
+      base.usage = info.usage;               // may be last-known (stale) or null
+      if (info.usageError) base.usageError = info.usageError;
+      if (info.usageStale) { base.usageStale = true; base.usageAsOf = info.usageAsOf; }
     } else if (info.status === 'error') {
       base.error = info.error;
     }
@@ -1554,6 +1613,231 @@ async function importCodexAccount({ json, importActive, label }) {
     accountIdHash: info.accountIdHash || null,
     subscriptionUntil: info.subscriptionUntil || null,
   };
+}
+
+// ---------- Codex (ChatGPT) browser OAuth login (in-app "Add account") ----------
+//
+// A real authorization-code + PKCE loopback flow that mirrors Claude's, so ANY
+// user can add their ChatGPT/Codex account from the browser. The Codex OAuth
+// client registers a FIXED loopback redirect (http://localhost:1455/auth/callback,
+// fallback :1457) — NOT this server's 8934 port — so we spin up a short-lived
+// listener on that exact port, handle the one callback, then close it.
+//
+// SECRETS: never log id_token / access_token / refresh_token or decoded PII
+// claims. Only status, a plan label, and an account-id HASH ever leave here.
+
+// Single-flight in-memory login state. Holds secrets (code_verifier, state) and
+// the live loopback server handle — never logged, never persisted to disk.
+let pendingCodexLogin = null; // { code_verifier, state, port, server, createdAt, status, label, error, timer }
+
+// Tear down any in-flight Codex login: close its loopback listener + clear timer.
+// Safe to call repeatedly.
+function endCodexLoopback() {
+  if (!pendingCodexLogin) return;
+  if (pendingCodexLogin.timer) { try { clearTimeout(pendingCodexLogin.timer); } catch {} }
+  const srv = pendingCodexLogin.server;
+  if (srv) { try { srv.close(); } catch {} }
+  pendingCodexLogin.server = null;
+}
+
+// Build the OpenAI authorize URL. Param order + values mirror the Codex CLI
+// (build_authorize_url in server.rs) exactly. encodeURIComponent renders spaces
+// in `scope` as %20, which the auth server accepts.
+function buildCodexAuthorizeUrl({ challenge, state, port }) {
+  const redirectUri = `http://localhost:${port}${CODEX_OAUTH.callbackPath}`;
+  const pairs = [
+    ['response_type', 'code'],
+    ['client_id', CODEX_OAUTH.clientId],
+    ['redirect_uri', redirectUri],
+    ['scope', CODEX_OAUTH.scope],
+    ['code_challenge', challenge],
+    ['code_challenge_method', 'S256'],
+    ['id_token_add_organizations', 'true'],
+    ['codex_cli_simplified_flow', 'true'],
+    ['state', state],
+    ['originator', CODEX_OAUTH.originator],
+  ];
+  const qs = pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+  return `${CODEX_OAUTH.authorizeUrl}?${qs}`;
+}
+
+// Exchange the authorization code for tokens. Codex uses form-encoded ONLY (no
+// JSON fallback) and does NOT send `state` in the body. Response JSON carries
+// { id_token, access_token, refresh_token }. Never logs tokens.
+async function exchangeCodexCodeForTokens(code, verifier, port) {
+  const redirectUri = `http://localhost:${port}${CODEX_OAUTH.callbackPath}`;
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: redirectUri,
+    client_id: CODEX_OAUTH.clientId,
+    code_verifier: verifier,
+  }).toString();
+
+  let res;
+  try {
+    res = await fetch(CODEX_OAUTH.tokenUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body,
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (e) {
+    throw new Error(`codex token exchange transport error: ${e.message}`);
+  }
+  if (!res.ok) {
+    // Error body is OAuth error JSON (e.g. invalid_grant), not a secret.
+    const errBody = await res.text().catch(() => '');
+    console.log(`[codex login] token exchange failed ${res.status}: ${errBody.slice(0, 300)}`);
+    const err = new Error(`codex token exchange failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
+// Pull the chatgpt_account_id claim out of an id_token (lives under OpenAI's
+// auth-claims namespace). Mirrors the CLI's persist logic. Returns null if absent.
+function codexAccountIdFromIdToken(idToken) {
+  const claims = decodeJwtClaims(idToken);
+  const auth = claims && claims[CODEX_AUTH_CLAIM];
+  const id = auth && auth.chatgpt_account_id;
+  return typeof id === 'string' && id ? id : null;
+}
+
+// Given a raw token response, build the on-disk ~/.codex/auth.json blob shape and
+// stash it as a Codex account. Does NOT clobber a live active account: if the user
+// already has a ~/.codex/auth.json we stash the new one under ~/.codex/accounts/
+// (inactive); only if they have NO active account do we make this the live slot.
+// Derives label/plan from the JWT. Never logs tokens. Returns { id, label, isActive }.
+async function completeCodexLoginFromTokens(tokenResp) {
+  const idToken = tokenResp.id_token || null;
+  const accessToken = tokenResp.access_token || null;
+  const refreshToken = tokenResp.refresh_token || null;
+  if (!idToken && !accessToken) throw new Error('codex token response missing tokens');
+
+  const accountId = codexAccountIdFromIdToken(idToken);
+  const parsed = {
+    auth_mode: 'chatgpt',
+    OPENAI_API_KEY: null,
+    tokens: {
+      id_token: idToken,
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      account_id: accountId,
+    },
+    last_refresh: new Date().toISOString(),
+  };
+
+  // Sanity-check the blob normalizes + decodes before persisting.
+  const norm = parseCodexBlob(parsed);
+  if (!norm) throw new Error('constructed codex blob failed validation');
+  const info = codexDeriveInfo(norm);
+  const id = codexStableId(norm);
+  const label = codexLabel(info, null);
+
+  await fsp.mkdir(CODEX_DIR, { recursive: true });
+
+  // Is there already a live active account? If NOT, make this one active.
+  const existingActive = parseCodexBlob(await readFileSafe(CODEX_AUTH_PATH));
+  if (!existingActive) {
+    await persistCodexBlob(CODEX_AUTH_PATH, norm);
+    return { id, label, isActive: true };
+  }
+
+  // Active account exists — stash the new one (inactive), never clobbering it.
+  // If this account is ALREADY the active one (re-login of same account), just
+  // refresh the live slot in place rather than creating a redundant stash.
+  if (codexStableId(existingActive) === id) {
+    await persistCodexBlob(CODEX_AUTH_PATH, norm);
+    return { id, label, isActive: true };
+  }
+  await fsp.mkdir(CODEX_ACCOUNTS_DIR, { recursive: true });
+  await persistCodexBlob(path.join(CODEX_ACCOUNTS_DIR, `${id}.json`), norm);
+  return { id, label, isActive: false };
+}
+
+// Handle the single OAuth callback hitting the loopback listener. Validates
+// state, exchanges the code, stashes the account, and writes the browser page.
+// Mutates pendingCodexLogin.status. Always ends the loopback afterward.
+async function handleCodexCallback(reqUrl, res) {
+  const p = pendingCodexLogin;
+  const code = reqUrl.searchParams.get('code');
+  const state = reqUrl.searchParams.get('state');
+  const oauthError = reqUrl.searchParams.get('error');
+  const errorDesc = reqUrl.searchParams.get('error_description');
+
+  const respond = (statusCode, message, ok) => {
+    res.writeHead(statusCode, { 'Content-Type': 'text/html; charset=utf-8', Connection: 'close' });
+    res.end(callbackPage(message, ok));
+  };
+
+  if (oauthError) {
+    if (p) { p.status = 'error'; p.error = errorDesc || oauthError; }
+    respond(400, `Login failed: ${escapeHtmlServer(errorDesc || oauthError)}`, false);
+    endCodexLoopback();
+    return;
+  }
+  if (!p || !state || state !== p.state) {
+    respond(400, 'Login state mismatch. Please retry from the dashboard.', false);
+    return; // don't tear down a valid pending login on a stray/foreign hit
+  }
+  if (!code) {
+    p.status = 'error'; p.error = 'no authorization code';
+    respond(400, 'No authorization code received.', false);
+    endCodexLoopback();
+    return;
+  }
+
+  try {
+    const tokenResp = await exchangeCodexCodeForTokens(code, p.code_verifier, p.port);
+    const { label, isActive } = await completeCodexLoginFromTokens(tokenResp);
+    p.status = 'done';
+    p.label = label || null;
+    respond(200, `Signed in to ${escapeHtmlServer(label || 'your ChatGPT account')}${isActive ? '' : ' (added)'}. You can close this tab.`, true);
+  } catch (e) {
+    console.log(`[codex callback] failed: ${e.status || ''} ${e.message}`);
+    p.status = 'error'; p.error = e.message;
+    respond(500, 'Could not complete sign-in. Please retry from the dashboard.', false);
+  } finally {
+    endCodexLoopback();
+  }
+}
+
+// Start the short-lived loopback listener on the Codex redirect port. Tries the
+// fixed port 1455, then the registered fallback 1457 (mirrors the CLI's
+// bind_server). Resolves { server, port }; rejects if neither port binds.
+function startCodexLoopback() {
+  return new Promise((resolve, reject) => {
+    const tryPort = (port, isLast) => {
+      const server = http.createServer(async (req, res) => {
+        try {
+          const reqUrl = new URL(req.url, `http://localhost:${port}`);
+          if (req.method === 'GET' && reqUrl.pathname === CODEX_OAUTH.callbackPath) {
+            await handleCodexCallback(reqUrl, res);
+            return;
+          }
+          res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' });
+          res.end('not found');
+        } catch (e) {
+          try {
+            res.writeHead(500, { 'Content-Type': 'text/plain', Connection: 'close' });
+            res.end('error');
+          } catch {}
+        }
+      });
+      server.on('error', (err) => {
+        if (err && err.code === 'EADDRINUSE' && !isLast) {
+          tryPort(CODEX_OAUTH.fallbackPort, true);
+        } else {
+          reject(err);
+        }
+      });
+      // Bind to 127.0.0.1 exactly like the CLI; localhost resolves here.
+      server.listen(port, '127.0.0.1', () => resolve({ server, port }));
+    };
+    tryPort(CODEX_OAUTH.loopbackPort, false);
+  });
 }
 
 // ---------- Automations / MCP / Skills (read + control surfaces) ----------
@@ -2432,6 +2716,85 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Codex browser OAuth login — start. Spins up the fixed-port loopback
+    // listener (1455/1457), builds + opens the OpenAI authorize URL, and stashes
+    // pending PKCE state. The callback is served by that loopback listener (NOT
+    // this server), so nothing else here handles /auth/callback. Returns the
+    // authorizeUrl so the front-end can also open it as a fallback.
+    if (url.pathname === '/api/accounts/codex-login-start' && req.method === 'POST') {
+      try {
+        // Cancel any in-flight login (close its listener) before starting fresh.
+        endCodexLoopback();
+
+        const { verifier, challenge } = makePkce(); // identical spec to Codex CLI
+        const state = base64url(crypto.randomBytes(32));
+
+        const { server, port } = await startCodexLoopback();
+
+        pendingCodexLogin = {
+          code_verifier: verifier,
+          state,
+          port,
+          server,
+          createdAt: Date.now(),
+          status: 'pending',
+          label: null,
+          error: null,
+          timer: null,
+        };
+        // Auto-expire the listener after 5 minutes so an abandoned login can't
+        // leak an open port forever.
+        pendingCodexLogin.timer = setTimeout(() => {
+          if (pendingCodexLogin && pendingCodexLogin.status === 'pending') {
+            pendingCodexLogin.status = 'error';
+            pendingCodexLogin.error = 'login timed out';
+          }
+          endCodexLoopback();
+        }, 5 * 60 * 1000);
+
+        const authorizeUrl = buildCodexAuthorizeUrl({ challenge, state, port });
+
+        // Open in the default browser server-side (front-end may also open it).
+        execFile('open', [authorizeUrl], () => {});
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, authorizeUrl, port }));
+      } catch (e) {
+        console.log(`[accounts/codex-login-start] failed: ${e.code || ''} ${e.message}`);
+        endCodexLoopback();
+        pendingCodexLogin = null;
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: e && e.code === 'EADDRINUSE'
+            ? `Codex login port ${CODEX_OAUTH.loopbackPort}/${CODEX_OAUTH.fallbackPort} is in use — close any running "codex login" and retry.`
+            : e.message,
+        }));
+      }
+      return;
+    }
+
+    // Codex browser OAuth login — status poll. Mirrors Claude's login-status:
+    // { status:'idle'|'pending'|'done'|'error', label?, error? }, reset after a
+    // terminal state is read once so the next add starts clean.
+    if (url.pathname === '/api/accounts/codex-login-status' && req.method === 'GET') {
+      const p = pendingCodexLogin;
+      let out;
+      if (!p) {
+        out = { status: 'idle' };
+      } else {
+        out = { status: p.status };
+        if (p.label) out.label = p.label;
+        if (p.error) out.error = p.error;
+      }
+      if (p && (p.status === 'done' || p.status === 'error')) {
+        endCodexLoopback();
+        pendingCodexLogin = null;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(out));
+      return;
+    }
+
     // ---------- Automations ----------
 
     if (url.pathname === '/api/automations' && req.method === 'GET') {
@@ -2549,6 +2912,7 @@ function readJsonBody(req) {
 
 // Bind to localhost only — this server can rewrite Keychain credentials via
 // /api/accounts/activate, so it must never be reachable off-box.
+loadUsageCache(); // warm the last-good-usage cache from disk before serving
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Claude Sessions dashboard running at http://localhost:${PORT}`);
 });
