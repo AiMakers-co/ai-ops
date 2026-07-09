@@ -571,8 +571,10 @@ function renderUsageRow(l) {
 // Degraded-but-not-blank usage line. Returns null when real usage bars should render.
 function usageNote(a) {
   if (a.usage) return null;
-  if (a.usageError === '429') return 'At limit';
-  if (a.usageError) return 'Usage unavailable (rate-limited)';
+  // A usage-endpoint error (incl. 429 throttling) means usage couldn't be
+  // fetched — NOT that the account is at its limit. Real at-limit shows as
+  // 100% bars from actual usage data.
+  if (a.usageError) return 'Usage unavailable';
   return null;
 }
 

@@ -178,7 +178,9 @@ struct Account: Codable, Identifiable {
             return "Usage unavailable — tap Refresh"
         default:
             guard usage == nil else { return nil }
-            if usageError == "429" { return "At limit" }
+            // A usage-endpoint error (incl. 429 throttling) means usage could
+            // not be fetched — NOT that the account is at its limit. True
+            // at-limit shows as 100% bars from real usage data.
             if usageError != nil { return "Usage unavailable" }
             return nil
         }

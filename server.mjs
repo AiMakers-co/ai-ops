@@ -572,16 +572,37 @@ const ANTHROPIC_HEADERS_BASE = {
   'anthropic-beta': 'oauth-2025-04-20',
 };
 
+// Fetch /usage with one retry on 429. IMPORTANT: a 429 here means the usage
+// ENDPOINT throttled our request (too many rapid calls) — it does NOT mean the
+// account is at its usage limit. A genuinely maxed account returns 200 with
+// percent=100 bars. So 429 => "usage temporarily unavailable", never "at limit".
+async function fetchUsageWithRetry(headers) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let res;
+    try {
+      res = await fetch('https://api.anthropic.com/api/oauth/usage', { headers });
+    } catch {
+      return { ok: false, status: 0 };
+    }
+    if (res.ok) return { ok: true, json: await res.json() };
+    if (res.status === 429 && attempt === 0) {
+      await new Promise((r) => setTimeout(r, 1200)); // brief backoff, then retry
+      continue;
+    }
+    return { ok: false, status: res.status };
+  }
+  return { ok: false, status: 429 };
+}
+
 async function fetchProfileAndUsage(accessToken) {
   const headers = { authorization: `Bearer ${accessToken}`, ...ANTHROPIC_HEADERS_BASE };
-  const [profileRes, usageRes] = await Promise.all([
-    fetch('https://api.anthropic.com/api/oauth/profile', { headers }),
-    fetch('https://api.anthropic.com/api/oauth/usage', { headers }),
-  ]);
-
-  // Token validity is determined by the PROFILE call only. Usage is
-  // best-effort: a maxed-out account returns 429 on /usage but is perfectly
-  // valid and switchable — it must NOT be treated as broken.
+  // Token validity is determined by the PROFILE call only.
+  let profileRes;
+  try {
+    profileRes = await fetch('https://api.anthropic.com/api/oauth/profile', { headers });
+  } catch {
+    return { status: 'error', error: 'network error' };
+  }
   if (profileRes.status === 401 || profileRes.status === 403) {
     return { status: 'needs_refresh' };
   }
@@ -591,11 +612,13 @@ async function fetchProfileAndUsage(accessToken) {
 
   const profile = await profileRes.json();
 
-  // Usage: include it if we got it; otherwise degrade (keep status 'ok').
+  // Usage is best-effort with a retry. If we still can't fetch it, degrade
+  // (status stays 'ok') and mark usageUnavailable — NOT "at limit".
+  const usageResult = await fetchUsageWithRetry(headers);
   let usage = null;
   let usageError = null;
-  if (usageRes.ok) {
-    const u = await usageRes.json();
+  if (usageResult.ok) {
+    const u = usageResult.json;
     const limits = (u.limits || []).map((l) => {
       let label = l.kind;
       if (l.kind === 'session') label = 'Current session';
@@ -605,8 +628,8 @@ async function fetchProfileAndUsage(accessToken) {
     });
     usage = { limits, five_hour: u.five_hour || null, seven_day: u.seven_day || null };
   } else {
-    // e.g. 429 => rate-limited / at limit. Surface it so the UI can say so.
-    usageError = String(usageRes.status);
+    // Endpoint threw/throttled — usage unknown, NOT at limit.
+    usageError = String(usageResult.status);
   }
 
   return {
