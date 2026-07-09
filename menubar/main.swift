@@ -1111,7 +1111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct ClaudeSessionsMenubarApp: App {
+struct AIOpsMenubarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var state = AppState.shared
 

@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-# Build the Claude Sessions Menubar app headlessly with swiftc and assemble the .app bundle.
+# Build the AI Ops app headlessly with swiftc and assemble the .app bundle.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR"
-APP_DIR="$SCRIPT_DIR/../Claude Sessions Menubar.app"
-BIN_NAME="Claude Sessions Menubar"
+APP_DIR="$SCRIPT_DIR/../AI Ops.app"
+BIN_NAME="AI Ops"
 LOGO_SRC="$SCRIPT_DIR/assets/aimakers-diamond.png"
 
 echo "==> Compiling…"
@@ -36,13 +36,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Claude Sessions Menubar</string>
+    <string>AI Ops</string>
     <key>CFBundleDisplayName</key>
-    <string>Claude Sessions Menubar</string>
+    <string>AI Ops</string>
     <key>CFBundleIdentifier</key>
     <string>co.aimakers.claudesessions</string>
     <key>CFBundleExecutable</key>
-    <string>Claude Sessions Menubar</string>
+    <string>AI Ops</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

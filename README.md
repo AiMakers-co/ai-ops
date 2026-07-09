@@ -37,7 +37,7 @@ cd ai-ops
 
 # Menubar app
 bash menubar/build.sh
-open "Claude Sessions Menubar.app"
+open "AI Ops.app"
 ```
 
 The menubar app can start at login via the toggle in its footer.

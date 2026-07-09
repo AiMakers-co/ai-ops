@@ -487,7 +487,7 @@ function callbackPage(message, ok) {
   const accent = ok ? '#7fbf7f' : '#d4685a';
   return `<!doctype html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claude Sessions</title>
+<title>AI Ops</title>
 <style>
   body{margin:0;background:#0e0f11;color:#e7e8ea;
     font:15px/1.6 -apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif;
@@ -2935,5 +2935,5 @@ function readJsonBody(req) {
 // /api/accounts/activate, so it must never be reachable off-box.
 loadUsageCache(); // warm the last-good-usage cache from disk before serving
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Claude Sessions dashboard running at http://localhost:${PORT}`);
+  console.log(`AI Ops dashboard running at http://localhost:${PORT}`);
 });
