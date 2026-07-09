@@ -89,6 +89,29 @@ enum Brand {
         light: NSColor(calibratedRed: 0.420, green: 0.384, blue: 0.345, alpha: 1), // #6B6258
         dark:  NSColor(calibratedRed: 0.827, green: 0.769, blue: 0.694, alpha: 1)  // lighter warm grey
     )
+
+    // Distinct accent for Codex/ChatGPT accounts, so provider is readable at a
+    // glance next to the terracotta Claude accounts.
+    static let codexTeal = Color(red: 0.06, green: 0.64, blue: 0.50)
+
+    // Green/red counts for the automations health glance.
+    static let ok = Color(red: 0.133, green: 0.773, blue: 0.369)   // #22C55E
+    static let bad = Color(red: 0.937, green: 0.267, blue: 0.267)  // #EF4444
+}
+
+// Small provider tag pill ("Claude" / "Codex") shown on each account row.
+struct ProviderTag: View {
+    let account: Account
+    var body: some View {
+        let isCodex = account.isCodex
+        let tint = isCodex ? Brand.codexTeal : Brand.terracotta
+        Text(isCodex ? "Codex" : "Claude")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(tint.opacity(0.16))
+            .clipShape(Capsule())
+    }
 }
 
 // The AI Makers diamond mark — four rounded squares in a 2x2 grid, rotated 45°.
@@ -154,8 +177,11 @@ struct SandRule: View {
 
 struct Account: Codable, Identifiable {
     var id: String { service }
+    let provider: String?          // "claude" | "codex"; absent => claude
     let service: String
-    let email: String
+    let email: String?             // Claude only; codex has none (use label)
+    let label: String?             // Codex display label (and claude mirror)
+    let orgTitle: String?          // Codex org, if any
     let plan: String?
     let isActive: Bool?
     let status: String?
@@ -165,12 +191,34 @@ struct Account: Codable, Identifiable {
 
     var active: Bool { isActive ?? false }
 
+    // Provider identity (default claude when the field is missing).
+    var providerName: String { provider ?? "claude" }
+    var isCodex: Bool { providerName == "codex" }
+
+    // Display name: codex has no email, so fall back to label, then service.
+    var displayName: String {
+        if let e = email, !e.isEmpty { return e }
+        if let l = label, !l.isEmpty { return l }
+        return service
+    }
+
     // Not switchable while the token itself is dead — switching would just fail.
-    var isSwitchable: Bool { status != "needs_refresh" }
+    // Codex is switchable only while its token is healthy (status == "ok").
+    var isSwitchable: Bool {
+        if isCodex { return status == "ok" }
+        return status != "needs_refresh"
+    }
 
     // Muted one-line status to show in place of usage bars when usage is
     // unavailable but the account itself still renders (never blank).
     var degradedNote: String? {
+        // Codex: any non-ok status means the OAuth token needs re-linking.
+        if isCodex {
+            if let s = status, s != "ok" { return "Reconnect Codex" }
+            guard usage == nil else { return nil }
+            if usageError != nil { return "Usage unavailable" }
+            return nil
+        }
         switch status {
         case "needs_refresh":
             return "Session expired — re-add to refresh"
@@ -240,6 +288,24 @@ struct Session: Codable, Identifiable {
         guard let cwd = cwd, !cwd.isEmpty else { return "" }
         return (cwd as NSString).lastPathComponent
     }
+}
+
+struct Automation: Codable, Identifiable {
+    let id: String
+    let kind: String?
+    let name: String?
+    let schedule: String?
+    let target: String?
+    let status: String?          // "running" | "idle" | "error"
+    let enabled: Bool?
+    let lastExit: Int?
+    let lastRun: String?
+    let nextRun: String?
+    let logPath: String?
+
+    // Failed = server flagged error, or last invocation exited non-zero.
+    var failed: Bool { status == "error" || (lastExit ?? 0) != 0 }
+    var running: Bool { status == "running" }
 }
 
 struct SaveCurrentResult: Codable {
@@ -353,6 +419,13 @@ actor API {
         return try JSONDecoder().decode([Session].self, from: data)
     }
 
+    func getAutomations() async throws -> [Automation] {
+        var req = URLRequest(url: url("/api/automations"))
+        req.timeoutInterval = 8
+        let (data, _) = try await URLSession.shared.data(for: req)
+        return try JSONDecoder().decode([Automation].self, from: data)
+    }
+
     @discardableResult
     func post(_ path: String, body: [String: Any]? = nil) async throws -> Data {
         var req = URLRequest(url: url(path))
@@ -367,7 +440,16 @@ actor API {
     }
 
     func resume(_ id: String) async throws { try await post("/api/resume/\(id)") }
-    func activate(_ service: String) async throws { try await post("/api/accounts/activate", body: ["service": service]) }
+
+    // Provider-aware activate: Claude switches by {service}; Codex by
+    // {provider:"codex", id}. Both hit /api/accounts/activate.
+    func activate(_ acc: Account) async throws {
+        if acc.isCodex {
+            try await post("/api/accounts/activate", body: ["provider": "codex", "id": acc.id])
+        } else {
+            try await post("/api/accounts/activate", body: ["service": acc.service])
+        }
+    }
     func loginStart() async throws { try await post("/api/accounts/login-start") }
     func removeAccount(_ service: String) async throws { try await post("/api/accounts/remove", body: ["service": service]) }
     func loginStatus() async throws -> LoginStatus {
@@ -448,6 +530,7 @@ final class AppState: ObservableObject {
 
     @Published var accounts: [Account] = []
     @Published var sessions: [Session] = []
+    @Published var automations: [Automation] = []
     @Published var loading = false
     @Published var lastError: String?
     @Published var loginWaiting = false   // one-click OAuth: browser sign-in in progress
@@ -458,6 +541,18 @@ final class AppState: ObservableObject {
 
     var activeAccount: Account? { accounts.first(where: { $0.active }) ?? accounts.first }
 
+    // Menubar status icon drives off the active CLAUDE account only — a codex
+    // account (which has no usage limits) must never steer the icon.
+    var activeClaudeAccount: Account? {
+        let claude = accounts.filter { !$0.isCodex }
+        return claude.first(where: { $0.active }) ?? claude.first
+    }
+
+    // Automations health glance (footer).
+    var automationsTotal: Int { automations.count }
+    var automationsRunning: Int { automations.filter { $0.running }.count }
+    var automationsFailed: Int { automations.filter { $0.failed }.count }
+
     func start() {
         refreshStartAtLogin()
         Task {
@@ -465,7 +560,10 @@ final class AppState: ObservableObject {
             await refreshAll()
         }
         timer = Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in
-            Task { await self?.loadAccounts() }
+            Task {
+                await self?.loadAccounts()
+                await self?.loadAutomations()
+            }
         }
     }
 
@@ -473,7 +571,8 @@ final class AppState: ObservableObject {
         loading = true
         async let a: () = loadAccounts()
         async let s: () = loadSessions()
-        _ = await (a, s)
+        async let au: () = loadAutomations()
+        _ = await (a, s, au)
         loading = false
     }
 
@@ -496,9 +595,18 @@ final class AppState: ObservableObject {
         }
     }
 
-    func activate(_ service: String) {
+    func loadAutomations() async {
+        do {
+            self.automations = try await API.shared.getAutomations()
+        } catch {
+            // Non-fatal: the glance just hides if the endpoint is unavailable.
+            self.automations = []
+        }
+    }
+
+    func activate(_ acc: Account) {
         Task {
-            try? await API.shared.activate(service)
+            try? await API.shared.activate(acc)
             await loadAccounts()
         }
     }
@@ -642,19 +750,20 @@ struct AccountUsageBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Text(acc.email).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink).lineLimit(1)
+                ProviderTag(account: acc)
+                Text(acc.displayName).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink).lineLimit(1)
                 if let plan = acc.plan, !plan.isEmpty {
                     Text(plan)
                         .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(Brand.terracottaDeep)
+                        .foregroundStyle(acc.isCodex ? Brand.codexTeal : Brand.terracottaDeep)
                         .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Brand.terracotta.opacity(0.16))
+                        .background((acc.isCodex ? Brand.codexTeal : Brand.terracotta).opacity(0.16))
                         .clipShape(Capsule())
                 }
                 Spacer()
                 if acc.active {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(Brand.terracotta)
+                        .foregroundStyle(acc.isCodex ? Brand.codexTeal : Brand.terracotta)
                         .font(.system(size: 12))
                 }
             }
@@ -755,7 +864,7 @@ struct ContentView: View {
                     .font(.system(size: 14, weight: .black))
                     .kerning(-0.2)
                     .foregroundStyle(Brand.ink)
-                Text("· Claude accounts")
+                Text("· Claude + Codex accounts")
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(Brand.inkMute)
             }
@@ -814,17 +923,18 @@ struct ContentView: View {
 
             ForEach(state.accounts) { acc in
                 HStack(spacing: 8) {
-                    Text(acc.email).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
+                    ProviderTag(account: acc)
+                    Text(acc.displayName).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
                     Spacer()
                     if acc.active {
                         Text("✓ Active")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Brand.terracotta)
+                            .foregroundStyle(acc.isCodex ? Brand.codexTeal : Brand.terracotta)
                     } else if acc.isSwitchable {
                         Button("Set active") { confirmSwitch(acc) }
                             .buttonStyle(TerracottaLinkStyle(size: 11))
                     } else {
-                        Text("Needs refresh")
+                        Text(acc.isCodex ? "Reconnect" : "Needs refresh")
                             .font(.system(size: 11)).foregroundStyle(Brand.inkMute)
                     }
                     if !acc.active {
@@ -846,20 +956,21 @@ struct ContentView: View {
     private func confirmSwitch(_ acc: Account) {
         let alert = NSAlert()
         alert.messageText = "Switch active account?"
-        alert.informativeText = "Switch to \(acc.email)? Claude Code will use this account for new sessions. Running sessions keep their current account until restarted."
+        let tool = acc.isCodex ? "Codex" : "Claude Code"
+        alert.informativeText = "Switch to \(acc.displayName)? \(tool) will use this account for new sessions. Running sessions keep their current account until restarted."
         alert.alertStyle = .warning
         // Cancel added first so it's the default/highlighted button and binds
         // to Return/Escape — switching is a deliberate action, not the default.
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Switch")
         if alert.runModal() == .alertSecondButtonReturn {
-            state.activate(acc.service)
+            state.activate(acc)
         }
     }
 
     private func confirmRemove(_ acc: Account) {
         let alert = NSAlert()
-        alert.messageText = "Remove account \(acc.email)?"
+        alert.messageText = "Remove account \(acc.displayName)?"
         alert.informativeText = "This removes the stored credentials for this account."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
@@ -905,9 +1016,40 @@ struct ContentView: View {
         return parts.joined(separator: " · ")
     }
 
+    // Compact automations health glance — deep-links into the dashboard's
+    // automations view. The menubar only glances; the dashboard owns controls.
+    @ViewBuilder private var automationsGlance: some View {
+        Button {
+            let link = Config.base + "/#automations"
+            if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+        } label: {
+            HStack(spacing: 5) {
+                Text("⚙").font(.system(size: 11)).foregroundStyle(Brand.inkMute)
+                Text("\(state.automationsTotal) automations")
+                    .font(.system(size: 11)).foregroundStyle(Brand.inkMute)
+                Text("·").font(.system(size: 11)).foregroundStyle(Brand.inkMute)
+                Text("\(state.automationsRunning) running")
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.ok)
+                Text("·").font(.system(size: 11)).foregroundStyle(Brand.inkMute)
+                Text("\(state.automationsFailed) failed")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(state.automationsFailed > 0 ? Brand.bad : Brand.inkMute)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 9)).foregroundStyle(Brand.inkMute)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Open automations in the dashboard")
+    }
+
     // 4. Footer
     @ViewBuilder private var footer: some View {
         VStack(spacing: 6) {
+            HStack {
+                automationsGlance
+                Spacer()
+            }
             HStack {
                 Button("Open Dashboard") {
                     if let url = URL(string: Config.base) { NSWorkspace.shared.open(url) }
@@ -979,8 +1121,11 @@ struct ClaudeSessionsMenubarApp: App {
                 .environmentObject(state)
                 .onAppear { Task { await state.refreshAll() } }
         } label: {
-            let pct = state.activeAccount?.worstWeeklyPercent ?? 0
-            let sev = MenuIcon.severity(state.activeAccount)
+            // Icon health reads off the active CLAUDE account only — codex
+            // accounts have no usage limits and must not drive the badge.
+            let claude = state.activeClaudeAccount
+            let pct = claude?.worstWeeklyPercent ?? 0
+            let sev = MenuIcon.severity(claude)
             HStack(spacing: 3) {
                 if let diamond = MenuIcon.diamondImage {
                     Image(nsImage: diamond)

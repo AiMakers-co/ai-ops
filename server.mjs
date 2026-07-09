@@ -29,6 +29,22 @@ const ACCOUNTS_REGISTRY_PATH = path.join(HOME, '.claude', 'accounts.json');
 const ACTIVE_SERVICE = 'Claude Code-credentials';
 const KEYCHAIN_ACCOUNT = os.userInfo().username;
 
+// ---------- Codex (ChatGPT) provider ----------
+// Codex creds live in a FILE, not Keychain: ~/.codex/auth.json (mode 0600).
+// Additional (stashed) accounts live as files under ~/.codex/accounts/<8hex>.json,
+// with a separate registry at ~/.codex/accounts-registry.json mapping
+// <8hex> -> { label }. The Codex registry is kept fully separate from the Claude
+// one to avoid coupling the two providers.
+const CODEX_DIR = path.join(HOME, '.codex');
+const CODEX_AUTH_PATH = path.join(CODEX_DIR, 'auth.json');
+const CODEX_ACCOUNTS_DIR = path.join(CODEX_DIR, 'accounts');
+const CODEX_REGISTRY_PATH = path.join(CODEX_DIR, 'accounts-registry.json');
+// OpenAI OAuth (Codex CLI client). client_id is the `aud` of the codex id_token.
+const CODEX_OAUTH = {
+  tokenUrl: 'https://auth.openai.com/oauth/token',
+  clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
+};
+
 // ---------- indexing ----------
 
 function extractText(content) {
@@ -1056,6 +1072,1017 @@ async function removeAccount(service) {
   return { ok: true, removed: service, hadRegistryEntry: hadEntry };
 }
 
+// ---------- Codex (ChatGPT) account provider ----------
+//
+// SECRETS: never log id_token / access_token / refresh_token or their decoded
+// JWT claims. PII claims (chatgpt_user_id, user_id, emails) are never logged and
+// never sent to the browser. Only plan label, org title, an account-id HASH,
+// status and (best-effort) usage leave this module.
+
+// Decode the middle (payload) segment of a JWT. base64url -> JSON. Returns the
+// claims object, or null if the token is malformed. Never logs the contents.
+function decodeJwtClaims(token) {
+  if (typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+  try {
+    const json = Buffer.from(
+      parts[1].replace(/-/g, '+').replace(/_/g, '/'),
+      'base64'
+    ).toString('utf8');
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+// Map ChatGPT's plan slug to a human label.
+function codexPlanLabel(planType) {
+  if (!planType) return null;
+  const map = {
+    free: 'Free',
+    plus: 'Plus',
+    pro: 'Pro',
+    prolite: 'Pro Lite',
+    team: 'Team',
+    business: 'Business',
+    enterprise: 'Enterprise',
+    edu: 'Edu',
+  };
+  const k = String(planType).toLowerCase();
+  if (map[k]) return map[k];
+  // Fallback: title-case whatever slug we got.
+  return k.charAt(0).toUpperCase() + k.slice(1);
+}
+
+async function readFileSafe(filePath) {
+  try {
+    return await fsp.readFile(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+// Parse a raw auth.json string into the Codex blob shape. Returns the parsed
+// object (with a valid tokens sub-object) or null. Accepts either the on-disk
+// shape { auth_mode, OPENAI_API_KEY, tokens:{...}, last_refresh } or a bare
+// tokens object.
+function parseCodexBlob(raw) {
+  if (!raw) return null;
+  let parsed;
+  try {
+    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  // Bare tokens object?
+  if (!parsed.tokens && (parsed.access_token || parsed.id_token || parsed.refresh_token)) {
+    parsed = { auth_mode: 'chatgpt', OPENAI_API_KEY: null, tokens: parsed, last_refresh: null };
+  }
+  const t = parsed.tokens;
+  if (!t || typeof t !== 'object') return null;
+  if (!t.access_token && !t.id_token) return null;
+  return parsed;
+}
+
+// Stable 8-hex id for a Codex account, derived from its account_id (which is
+// stable across token refreshes, unlike the access token). Used as the stash
+// filename and the account's public `id`.
+function codexStableId(parsed) {
+  const accountId =
+    parsed?.tokens?.account_id ||
+    // Fall back to a claim if account_id is somehow absent.
+    decodeJwtClaims(parsed?.tokens?.id_token || parsed?.tokens?.access_token)?.[
+      'https://api.openai.com/auth'
+    ]?.chatgpt_account_id ||
+    '';
+  return crypto.createHash('sha256').update(String(accountId)).digest('hex').slice(0, 8);
+}
+
+// A non-reversible hash of the account_id — safe to send to the browser as a
+// stable identifier without leaking the real id.
+function codexAccountIdHash(parsed) {
+  const accountId = parsed?.tokens?.account_id || '';
+  return crypto.createHash('sha256').update(String(accountId)).digest('hex').slice(0, 12);
+}
+
+// Derive account info purely from the JWT claims (the JWT *is* the profile for
+// Codex — plan/org/subscription all live in claims). No network call.
+//   status: 'ok'           access token present and not expired
+//           'needs_refresh' access token expired (or about to be)
+//           'error'         no decodable token
+function codexDeriveInfo(parsed) {
+  const accessClaims = decodeJwtClaims(parsed?.tokens?.access_token);
+  const idClaims = decodeJwtClaims(parsed?.tokens?.id_token);
+  if (!accessClaims && !idClaims) return { status: 'error', error: 'undecodable token' };
+
+  // Prefer the id_token for org/subscription (richer), either for plan.
+  const AUTH = 'https://api.openai.com/auth';
+  const accessAuth = (accessClaims && accessClaims[AUTH]) || {};
+  const idAuth = (idClaims && idClaims[AUTH]) || {};
+
+  const planType = idAuth.chatgpt_plan_type || accessAuth.chatgpt_plan_type || null;
+  const orgs = Array.isArray(idAuth.organizations) ? idAuth.organizations : [];
+  const defaultOrg = orgs.find((o) => o && o.is_default) || orgs[0] || null;
+  const orgTitle = defaultOrg?.title || null;
+  const subscriptionUntil = idAuth.chatgpt_subscription_active_until || null;
+
+  // Expiry is on the access token's standard `exp` (unix seconds). If we only
+  // have an id_token, use its exp.
+  const exp = (accessClaims && accessClaims.exp) || (idClaims && idClaims.exp) || null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expired = exp ? exp <= nowSec + 60 : false; // 60s skew, mirror Claude
+
+  return {
+    status: expired ? 'needs_refresh' : 'ok',
+    plan: codexPlanLabel(planType),
+    planType: planType || null,
+    orgTitle,
+    subscriptionUntil,
+    accountIdHash: codexAccountIdHash(parsed),
+    exp,
+    expired,
+  };
+}
+
+// Build the display label: prefer a user-set registry label, else plan + org,
+// else a generic fallback. Never includes PII.
+function codexLabel(info, registryLabel) {
+  if (registryLabel) return registryLabel;
+  const bits = [];
+  if (info.plan) bits.push(info.plan);
+  if (info.orgTitle) bits.push(info.orgTitle);
+  if (bits.length) return bits.join(' · ') + ' (ChatGPT)';
+  return 'ChatGPT account';
+}
+
+async function loadCodexRegistry() {
+  try {
+    const raw = await fsp.readFile(CODEX_REGISTRY_PATH, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function writeCodexRegistry(registry) {
+  await writeSecretFile(CODEX_REGISTRY_PATH, JSON.stringify(registry, null, 2));
+}
+
+// Persist a (possibly refreshed) Codex blob back to its source file, 0600.
+async function persistCodexBlob(targetPath, parsed) {
+  await writeSecretFile(targetPath, JSON.stringify(parsed, null, 2));
+}
+
+// Use the stored refresh token to mint a fresh token trio and persist the
+// rotated tokens back to `targetPath`. Refresh tokens are SINGLE-USE — if we
+// don't save the new one the account bricks. Mirrors Claude's refreshServiceToken.
+// Returns the updated parsed blob, or null if refresh is impossible/failed.
+// Never logs tokens.
+async function refreshCodexToken(parsed, targetPath) {
+  const refreshToken = parsed?.tokens?.refresh_token;
+  if (!refreshToken) return null;
+
+  let resp;
+  try {
+    resp = await fetch(CODEX_OAUTH.tokenUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        client_id: CODEX_OAUTH.clientId,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return null; // network error / timeout
+  }
+  if (!resp.ok) {
+    // e.g. invalid_grant -> refresh token truly dead; leave the blob as-is.
+    console.log(`[codex refresh] ${codexStableId(parsed)}: refresh grant failed ${resp.status}`);
+    return null;
+  }
+  let tok;
+  try { tok = await resp.json(); } catch { return null; }
+  if (!tok.access_token && !tok.id_token) return null;
+
+  const updated = {
+    ...parsed,
+    tokens: {
+      ...parsed.tokens,
+      id_token: tok.id_token || parsed.tokens.id_token,
+      access_token: tok.access_token || parsed.tokens.access_token,
+      refresh_token: tok.refresh_token || parsed.tokens.refresh_token,
+    },
+    last_refresh: new Date().toISOString(),
+  };
+
+  try {
+    await persistCodexBlob(targetPath, updated);
+  } catch {
+    console.log(`[codex refresh] ${codexStableId(parsed)}: write-back failed`);
+    return null;
+  }
+  console.log(`[codex refresh] ${codexStableId(parsed)}: token refreshed`);
+  return updated;
+}
+
+// BEST-EFFORT Codex/ChatGPT usage fetch. This is UNCONFIRMED against a live,
+// non-expired account — Mark's current token is expired (403s), so this path is
+// not exercised in practice yet and MUST degrade gracefully.
+//
+// What was tried / documented for later validation:
+//   Endpoint attempted: GET https://chatgpt.com/backend-api/codex/usage
+//   Headers:            authorization: Bearer <access_token>
+//                       chatgpt-account-id: <account_id>
+//                       user-agent: <browser-ish UA>
+//   Also read rate-limit hints from response headers (x-ratelimit-*).
+// Real shape: UNCONFIRMED. On any non-2xx / parse failure / timeout we return
+// { usage: null, usageError } and NEVER invent usage numbers. When a live
+// account is connected, verify the true endpoint + JSON shape and map it into
+// Claude's usage shape (usage.limits[] = {kind,label,percent,severity,resets_at}).
+async function fetchCodexUsage(accessToken, accountId) {
+  const headers = {
+    authorization: `Bearer ${accessToken}`,
+    'user-agent':
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36',
+  };
+  if (accountId) headers['chatgpt-account-id'] = accountId;
+
+  let res;
+  try {
+    res = await fetch('https://chatgpt.com/backend-api/codex/usage', {
+      headers,
+      signal: AbortSignal.timeout(6_000),
+    });
+  } catch {
+    return { usage: null, usageError: 'network' };
+  }
+  if (!res.ok) {
+    return { usage: null, usageError: String(res.status) };
+  }
+
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    return { usage: null, usageError: 'parse' };
+  }
+
+  // We got a 2xx JSON body but the shape is UNCONFIRMED. Try a defensive map
+  // into Claude's usage shape; if we can't recognise it, degrade to plan-only
+  // rather than invent numbers.
+  try {
+    const limits = [];
+    // Heuristic candidates — adjust once the real shape is known.
+    const buckets = [
+      { src: body.primary || body.five_hour || body.session, kind: 'session', label: 'Current session (5h)' },
+      { src: body.secondary || body.weekly || body.seven_day, kind: 'weekly_all', label: 'Weekly' },
+    ];
+    for (const b of buckets) {
+      if (!b.src || typeof b.src !== 'object') continue;
+      const used = b.src.used_percent ?? b.src.percent ?? null;
+      if (used == null) continue;
+      const percent = Math.max(0, Math.min(100, Number(used)));
+      limits.push({
+        kind: b.kind,
+        label: b.label,
+        percent,
+        severity: percent >= 100 ? 'critical' : percent >= 80 ? 'warning' : 'ok',
+        resets_at: b.src.resets_at || b.src.reset_at || null,
+      });
+    }
+    if (limits.length) return { usage: { limits }, usageError: null };
+    return { usage: null, usageError: 'unrecognized_shape' };
+  } catch {
+    return { usage: null, usageError: 'unrecognized_shape' };
+  }
+}
+
+// Discover every Codex account: the active ~/.codex/auth.json (if present +
+// parseable) plus every ~/.codex/accounts/<id>.json stash. Never throws if
+// ~/.codex is absent. Dedupes a stash that duplicates the active account.
+async function discoverCodexAccounts() {
+  const found = [];
+  const activeParsed = parseCodexBlob(await readFileSafe(CODEX_AUTH_PATH));
+  let activeId = null;
+  if (activeParsed) {
+    activeId = codexStableId(activeParsed);
+    found.push({ id: activeId, path: CODEX_AUTH_PATH, isActive: true, parsed: activeParsed });
+  }
+
+  let files = [];
+  try {
+    files = await fsp.readdir(CODEX_ACCOUNTS_DIR);
+  } catch {
+    files = [];
+  }
+  for (const f of files) {
+    if (!f.endsWith('.json')) continue;
+    const id = f.replace(/\.json$/, '');
+    if (activeId && id === activeId) continue; // stash duplicates active -> hide
+    const parsed = parseCodexBlob(await readFileSafe(path.join(CODEX_ACCOUNTS_DIR, f)));
+    if (!parsed) continue;
+    found.push({ id, path: path.join(CODEX_ACCOUNTS_DIR, f), isActive: false, parsed });
+  }
+  return found;
+}
+
+// Build the Codex slice of the unified accounts list. Each entry mirrors the
+// Claude shape but carries provider:'codex'. NEVER includes tokens. Returns []
+// (never throws) when ~/.codex is absent or has no parseable accounts.
+async function buildCodexAccountsList() {
+  let found;
+  try {
+    found = await discoverCodexAccounts();
+  } catch {
+    return [];
+  }
+  if (!found.length) return [];
+
+  const registry = await loadCodexRegistry();
+
+  return Promise.all(
+    found.map(async ({ id, path: filePath, isActive, parsed }) => {
+      let blob = parsed;
+      let info = codexDeriveInfo(blob);
+
+      // Proactive refresh: if the access token is expired, mint a fresh one from
+      // the refresh token and persist the rotated tokens back to this file.
+      if (info.expired && blob?.tokens?.refresh_token) {
+        const refreshed = await refreshCodexToken(blob, filePath);
+        if (refreshed) {
+          blob = refreshed;
+          info = codexDeriveInfo(blob);
+        }
+      }
+
+      let usage = null;
+      let usageError = null;
+      if (info.status === 'ok') {
+        const u = await fetchCodexUsage(blob.tokens.access_token, blob.tokens.account_id);
+        usage = u.usage;
+        usageError = u.usageError;
+      } else {
+        usageError = info.status === 'needs_refresh' ? 'token_expired' : (info.error || 'token_error');
+      }
+
+      const label = codexLabel(info, registry[id]?.label);
+      return {
+        provider: 'codex',
+        id,
+        service: id,        // parallel to Claude's `service` for UI compatibility
+        label,
+        email: null,        // Codex has no email in claims
+        plan: info.plan || null,
+        isActive,
+        status: info.status,
+        usage,
+        usageError,
+        orgTitle: info.orgTitle || null,
+        accountIdHash: info.accountIdHash || null,
+        subscriptionUntil: info.subscriptionUntil || null,
+      };
+    })
+  );
+}
+
+// Set a Codex account active: back up the CURRENT ~/.codex/auth.json into a
+// stash file first (so it is never lost), then write the chosen blob to
+// ~/.codex/auth.json (0600, temp+rename). Mirrors Claude's activate safety.
+async function activateCodexAccount(targetId) {
+  if (!targetId || typeof targetId !== 'string') {
+    const err = new Error('id is required'); err.code = 'INVALID'; throw err;
+  }
+  const stashPath = path.join(CODEX_ACCOUNTS_DIR, `${targetId}.json`);
+  const targetParsed = parseCodexBlob(await readFileSafe(stashPath));
+  if (!targetParsed) {
+    const err = new Error('codex account not found'); err.code = 'NOT_FOUND'; throw err;
+  }
+
+  // Back up the current active account into a stash before overwriting it.
+  const activeParsed = parseCodexBlob(await readFileSafe(CODEX_AUTH_PATH));
+  if (activeParsed) {
+    const activeId = codexStableId(activeParsed);
+    if (activeId !== targetId) {
+      await fsp.mkdir(CODEX_ACCOUNTS_DIR, { recursive: true });
+      await persistCodexBlob(path.join(CODEX_ACCOUNTS_DIR, `${activeId}.json`), activeParsed);
+    }
+  }
+
+  // Promote the chosen account to the live slot.
+  await persistCodexBlob(CODEX_AUTH_PATH, targetParsed);
+  return { ok: true, provider: 'codex', activeId: targetId };
+}
+
+// Remove a stashed Codex account (delete its stash file + registry entry).
+// NEVER removes the live ~/.codex/auth.json active slot.
+async function removeCodexAccount(id) {
+  if (!id || typeof id !== 'string') {
+    const err = new Error('id is required'); err.code = 'INVALID'; throw err;
+  }
+  // Guard: if this id matches the currently-active account, refuse.
+  const activeParsed = parseCodexBlob(await readFileSafe(CODEX_AUTH_PATH));
+  if (activeParsed && codexStableId(activeParsed) === id) {
+    const err = new Error('cannot remove the active codex account'); err.code = 'INVALID'; throw err;
+  }
+
+  const registry = await loadCodexRegistry();
+  const hadEntry = !!registry[id];
+  if (hadEntry) {
+    delete registry[id];
+    await writeCodexRegistry(registry);
+  }
+
+  let removedFile = false;
+  try {
+    await fsp.unlink(path.join(CODEX_ACCOUNTS_DIR, `${id}.json`));
+    removedFile = true;
+  } catch {
+    // already gone / registry-only entry — fine
+  }
+
+  return { ok: true, provider: 'codex', removed: id, removedFile, hadRegistryEntry: hadEntry };
+}
+
+// Codex "add account" (import/stash only — NO browser OAuth login flow yet).
+// Two modes:
+//   { importActive: true, label? } — stash a copy of the current ~/.codex/auth.json
+//   { json: <auth.json string|object>, label? } — stash a pasted blob
+// Writes a stash file under ~/.codex/accounts/<id>.json (0600) and, if a label
+// is given, records it in the Codex registry. Never overwrites the live slot.
+async function importCodexAccount({ json, importActive, label }) {
+  let parsed;
+  if (importActive) {
+    parsed = parseCodexBlob(await readFileSafe(CODEX_AUTH_PATH));
+    if (!parsed) {
+      const err = new Error('no active codex account to import'); err.code = 'NOT_FOUND'; throw err;
+    }
+  } else {
+    if (!json) {
+      const err = new Error('json or importActive is required'); err.code = 'INVALID'; throw err;
+    }
+    parsed = parseCodexBlob(json);
+    if (!parsed) {
+      const err = new Error('does not look like a codex auth.json blob'); err.code = 'INVALID'; throw err;
+    }
+  }
+
+  const id = codexStableId(parsed);
+  await fsp.mkdir(CODEX_ACCOUNTS_DIR, { recursive: true });
+  await persistCodexBlob(path.join(CODEX_ACCOUNTS_DIR, `${id}.json`), parsed);
+
+  if (label) {
+    const registry = await loadCodexRegistry();
+    registry[id] = { label };
+    await writeCodexRegistry(registry);
+  }
+
+  const info = codexDeriveInfo(parsed);
+  return {
+    provider: 'codex',
+    id,
+    service: id,
+    label: codexLabel(info, label),
+    email: null,
+    plan: info.plan || null,
+    isActive: false,
+    status: info.status,
+    orgTitle: info.orgTitle || null,
+    accountIdHash: info.accountIdHash || null,
+    subscriptionUntil: info.subscriptionUntil || null,
+  };
+}
+
+// ---------- Automations / MCP / Skills (read + control surfaces) ----------
+//
+// Three additional local surfaces. All READ paths are safe. The MUTATING
+// automation paths (run / toggle) validate the target id against the live list
+// first, back up the crontab before any edit, and only ever touch the exact
+// matched line. NEVER return secrets — MCP env/args/headers are hard-excluded.
+
+const CRON_BACKUP_DIR = path.join(HOME, '.claude', 'crontab-backups');
+const LAUNCHD_LABEL_RX = /aimakers|nora|upwork|veo|claudesessions|x-growth|seo/i;
+const UID = typeof process.getuid === 'function' ? process.getuid() : 501;
+const DOW_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+// Expand one 5-field-cron field ("*", "1,2", "1-5", "*/5", "1-10/2", "5/10")
+// into the sorted list of allowed integers within [min,max].
+function expandCronField(field, min, max) {
+  const out = new Set();
+  for (const part of String(field).split(',')) {
+    let m;
+    if (part === '*') { for (let v = min; v <= max; v++) out.add(v); }
+    else if ((m = part.match(/^\*\/(\d+)$/))) { const s = +m[1]; if (s > 0) for (let v = min; v <= max; v += s) out.add(v); }
+    else if ((m = part.match(/^(\d+)-(\d+)\/(\d+)$/))) { const a = +m[1], b = +m[2], s = +m[3]; if (s > 0) for (let v = a; v <= b; v += s) out.add(v); }
+    else if ((m = part.match(/^(\d+)-(\d+)$/))) { const a = +m[1], b = +m[2]; for (let v = a; v <= b; v++) out.add(v); }
+    else if ((m = part.match(/^(\d+)\/(\d+)$/))) { const a = +m[1], s = +m[2]; if (s > 0) for (let v = a; v <= max; v += s) out.add(v); }
+    else if (/^\d+$/.test(part)) { out.add(+part); }
+  }
+  return [...out].filter((v) => v >= min && v <= max);
+}
+
+// Build allowed-value Sets from the 5 cron fields, plus dom/dow "restricted"
+// flags (standard cron: if BOTH dom and dow are restricted, a day matches if
+// EITHER matches; if only one is restricted, only that one gates the day).
+function cronSets(min, hour, dom, mon, dow) {
+  let dows = new Set(expandCronField(dow, 0, 7).map((v) => (v === 7 ? 0 : v)));
+  return {
+    minutes: new Set(expandCronField(min, 0, 59)),
+    hours: new Set(expandCronField(hour, 0, 23)),
+    doms: new Set(expandCronField(dom, 1, 31)),
+    months: new Set(expandCronField(mon, 1, 12)),
+    dows,
+    domR: String(dom).trim() !== '*',
+    dowR: String(dow).trim() !== '*',
+  };
+}
+
+// Next fire time (ISO string, local) for a matcher-set, stepping minute by
+// minute from `fromMs`. Bounded to 366 days so an impossible spec can't loop
+// forever. Daily/weekly jobs resolve in a few thousand iterations.
+function nextFireFromSets(sets, fromMs) {
+  if (!sets || !sets.minutes.size || !sets.hours.size || !sets.months.size) return null;
+  const d = new Date(fromMs);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
+  const limitMs = fromMs + 366 * 24 * 3600 * 1000;
+  while (d.getTime() <= limitMs) {
+    const mo = d.getMonth() + 1, dom = d.getDate(), dow = d.getDay(), h = d.getHours(), mi = d.getMinutes();
+    if (sets.months.has(mo)) {
+      let dayOk;
+      if (sets.domR && sets.dowR) dayOk = sets.doms.has(dom) || sets.dows.has(dow);
+      else if (sets.domR) dayOk = sets.doms.has(dom);
+      else if (sets.dowR) dayOk = sets.dows.has(dow);
+      else dayOk = true;
+      if (dayOk && sets.hours.has(h) && sets.minutes.has(mi)) return d.toISOString();
+    }
+    d.setMinutes(d.getMinutes() + 1);
+  }
+  return null;
+}
+
+// Readable summary of a 5-field cron expression (falls back to the raw expr).
+function humanCron(min, hour, dom, mon, dow) {
+  const raw = `${min} ${hour} ${dom} ${mon} ${dow}`;
+  const single = (f) => /^\d+$/.test(f);
+  let m;
+  if ((m = String(min).match(/^\*\/(\d+)$/)) && hour === '*' && dom === '*' && mon === '*' && dow === '*') return `every ${m[1]} min`;
+  if (min === '*' && hour === '*') return 'every minute';
+  if (single(min) && single(hour)) {
+    const t = `${pad2(+hour)}:${pad2(+min)}`;
+    if (dom === '*' && mon === '*' && dow === '*') return `daily ${t}`;
+    if (dom === '*' && mon === '*' && single(dow)) return `weekly ${DOW_NAMES[(+dow) % 7]} ${t}`;
+    if (single(dom) && mon === '*' && dow === '*') return `monthly day ${dom} ${t}`;
+    return `${t} (${raw})`;
+  }
+  return raw;
+}
+
+// Parse a single crontab command line into its 5 fields + command, or null if
+// it isn't a schedule line (env assignment, prose comment, blank, etc.).
+function parseCronLine(line) {
+  const m = line.match(/^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+  if (!m) return null;
+  const [, min, hour, dom, mon, dow, command] = m;
+  const fieldRx = /^[\d*,\-/]+$/; // numeric cron fields only (no month/day names)
+  if (![min, hour, dom, mon, dow].every((f) => fieldRx.test(f))) return null;
+  return { min, hour, dom, mon, dow, command: command.trim() };
+}
+
+// Capture a `>> /path/log` (or `> /path/log`) redirect target from a command.
+function extractLogPath(command) {
+  const m = command.match(/>>?\s*("([^"]+)"|'([^']+)'|(\S+))/);
+  if (!m) return null;
+  const p = m[2] || m[3] || m[4];
+  if (!p || p === '/dev/null') return null;
+  return p;
+}
+
+// Basename-ish target from a shell command: prefer the first script-looking
+// argument, else the leading token's basename.
+function commandTarget(command) {
+  const scriptM = command.match(/(\S+\.(?:sh|mjs|js|py|ts|rb|pl))\b/);
+  if (scriptM) return path.basename(scriptM[1]);
+  const first = command.trim().split(/\s+/)[0] || '';
+  return path.basename(first) || first;
+}
+
+// Build the crontab slice of the automations list. Handles disabled
+// (commented-out) schedule lines and prose "# name" annotations. Never throws.
+async function buildCronAutomations() {
+  let raw;
+  try { const r = await execP('crontab -l 2>/dev/null'); raw = r.stdout; }
+  catch { return []; }
+  if (!raw || !raw.trim()) return [];
+
+  const lines = raw.split('\n');
+  const out = [];
+  let pendingComment = null;
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let enabled = true;
+    let toParse = line;
+
+    if (/^\s*#/.test(line)) {
+      const inner = line.replace(/^\s*#+\s?/, '');
+      if (parseCronLine(inner)) { toParse = inner; enabled = false; } // disabled schedule
+      else { pendingComment = inner.trim() || pendingComment; continue; } // prose name
+    }
+
+    const parsed = parseCronLine(toParse);
+    if (!parsed) continue;
+    const { min, hour, dom, mon, dow, command } = parsed;
+
+    const name = pendingComment || commandTarget(command);
+    pendingComment = null;
+
+    const logPath = extractLogPath(command);
+    let lastRun = null;
+    if (logPath) { try { const st = await fsp.stat(logPath); lastRun = new Date(st.mtimeMs).toISOString(); } catch {} }
+
+    const scheduleStr = `${min} ${hour} ${dom} ${mon} ${dow}`;
+    const id = 'cron:' + crypto.createHash('sha1').update(scheduleStr + '|' + command).digest('hex').slice(0, 10);
+
+    out.push({
+      id,
+      kind: 'cron',
+      name,
+      schedule: humanCron(min, hour, dom, mon, dow),
+      target: commandTarget(command),
+      status: 'idle',
+      enabled,
+      lastExit: null,
+      lastRun,
+      nextRun: enabled ? nextFireFromSets(cronSets(min, hour, dom, mon, dow), Date.now()) : null,
+      logPath,
+      command,        // user's own crontab command — used by run-now
+      rawLine: line,  // exact source line — used by toggle
+    });
+  }
+  return out;
+}
+
+// Duration seconds -> short human string (for launchd StartInterval).
+function humanDuration(s) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  if (s < 86400) { const h = s / 3600; return `${Number.isInteger(h) ? h : h.toFixed(1)} h`; }
+  const d = s / 86400; return `${Number.isInteger(d) ? d : d.toFixed(1)} d`;
+}
+
+// Matcher-set from a StartCalendarInterval object (missing key = wildcard).
+function calSets(c) {
+  const one = (v, min, max) => {
+    if (typeof v === 'number') return new Set([v]);
+    const s = new Set(); for (let i = min; i <= max; i++) s.add(i); return s;
+  };
+  let dows = one(c.Weekday, 0, 7); dows = new Set([...dows].map((v) => (v === 7 ? 0 : v)));
+  return {
+    minutes: one(c.Minute, 0, 59),
+    hours: one(c.Hour, 0, 23),
+    doms: one(c.Day, 1, 31),
+    months: one(c.Month, 1, 12),
+    dows,
+    domR: typeof c.Day === 'number',
+    dowR: typeof c.Weekday === 'number',
+  };
+}
+
+// Best-effort target basename from a launchd plist's ProgramArguments/Program,
+// skipping known interpreters so we surface the actual script.
+function launchdTarget(plist) {
+  const interp = new Set(['bash', 'sh', 'zsh', 'node', 'python', 'python3', 'npx', 'env', 'claude', 'ruby', 'perl']);
+  const args = Array.isArray(plist.ProgramArguments)
+    ? plist.ProgramArguments
+    : (plist.Program ? [plist.Program] : []);
+  const paths = args.filter((a) => typeof a === 'string' && a.startsWith('/'));
+  for (let i = paths.length - 1; i >= 0; i--) {
+    const b = path.basename(paths[i]);
+    if (!interp.has(b)) return b;
+  }
+  if (paths.length) return path.basename(paths[0]);
+  if (args.length) return path.basename(String(args[0]));
+  return null;
+}
+
+// Human schedule + nextRun from a launchd plist.
+function launchdSchedule(plist) {
+  if (typeof plist.StartInterval === 'number') {
+    return {
+      human: `every ${humanDuration(plist.StartInterval)}`,
+      nextRun: new Date(Date.now() + plist.StartInterval * 1000).toISOString(),
+    };
+  }
+  const sci = plist.StartCalendarInterval;
+  if (sci) {
+    const arr = Array.isArray(sci) ? sci : [sci];
+    let next = null;
+    const times = [];
+    for (const c of arr) {
+      const nf = nextFireFromSets(calSets(c), Date.now());
+      if (nf && (!next || nf < next)) next = nf;
+      if (typeof c.Hour === 'number') times.push(`${pad2(c.Hour)}:${pad2(typeof c.Minute === 'number' ? c.Minute : 0)}`);
+    }
+    let human;
+    if (arr.length > 1) {
+      times.sort();
+      human = times.length ? `${arr.length}x/day ${times[0]}–${times[times.length - 1]}` : `${arr.length}x/day`;
+    } else {
+      const c = arr[0];
+      const t = typeof c.Hour === 'number' ? `${pad2(c.Hour)}:${pad2(typeof c.Minute === 'number' ? c.Minute : 0)}` : null;
+      if (typeof c.Weekday === 'number') human = `weekly ${DOW_NAMES[c.Weekday % 7]}${t ? ' ' + t : ''}`;
+      else if (typeof c.Day === 'number') human = `monthly day ${c.Day}${t ? ' ' + t : ''}`;
+      else if (t) human = `daily ${t}`;
+      else human = 'calendar';
+    }
+    return { human, nextRun: next };
+  }
+  if (plist.RunAtLoad) return { human: 'at load', nextRun: null };
+  return { human: '(on demand)', nextRun: null };
+}
+
+// Build the launchd (user agent) slice of the automations list. Filters to the
+// user's own labels; skips transient GUI-app registrations ("application.*").
+async function buildLaunchdAutomations() {
+  let listOut;
+  try { const r = await execP('launchctl list 2>/dev/null'); listOut = r.stdout; }
+  catch { return []; }
+
+  const out = [];
+  for (const line of listOut.split('\n')) {
+    if (!line.trim()) continue;
+    const cols = line.split('\t');
+    if (cols.length < 3) continue;
+    const [pidStr, exitStr, label] = cols;
+    if (!label || !LAUNCHD_LABEL_RX.test(label)) continue;
+    if (/^application\./.test(label)) continue; // transient GUI-app registration
+
+    const plistPath = path.join(HOME, 'Library', 'LaunchAgents', `${label}.plist`);
+    let plist = null;
+    try {
+      const { stdout } = await execFileP('plutil', ['-convert', 'json', '-o', '-', plistPath]);
+      plist = JSON.parse(stdout);
+    } catch { plist = null; } // plist missing/unreadable — degrade, don't crash
+
+    const pid = (pidStr === '-' || pidStr === '') ? null : parseInt(pidStr, 10);
+    const lastExit = (exitStr === '-' || exitStr === '') ? null : parseInt(exitStr, 10);
+    let status;
+    if (pid != null && !Number.isNaN(pid)) status = 'running';
+    else if (lastExit && lastExit !== 0) status = 'error';
+    else status = 'idle';
+
+    let schedule = '(on demand)', nextRun = null, target = label, logPath = null;
+    if (plist) {
+      logPath = plist.StandardOutPath || plist.StandardErrorPath || null;
+      target = launchdTarget(plist) || label;
+      const s = launchdSchedule(plist);
+      schedule = s.human; nextRun = s.nextRun;
+    }
+    let lastRun = null;
+    if (logPath) { try { const st = await fsp.stat(logPath); lastRun = new Date(st.mtimeMs).toISOString(); } catch {} }
+
+    out.push({
+      id: 'launchd:' + label,
+      kind: 'launchd',
+      name: label,
+      schedule,
+      target,
+      status,
+      enabled: true,
+      lastExit,
+      lastRun,
+      nextRun,
+      logPath,
+      label,
+    });
+  }
+  return out;
+}
+
+// Unified automations list, sorted running-first then soonest nextRun.
+async function buildAutomationsList() {
+  const [cron, launchd] = await Promise.all([buildCronAutomations(), buildLaunchdAutomations()]);
+  const all = [...cron, ...launchd];
+  all.sort((a, b) => {
+    const ar = a.status === 'running' ? 0 : 1;
+    const br = b.status === 'running' ? 0 : 1;
+    if (ar !== br) return ar - br;
+    const an = a.nextRun || '9999', bn = b.nextRun || '9999';
+    return an.localeCompare(bn);
+  });
+  return all;
+}
+
+async function findAutomation(id) {
+  if (!id || typeof id !== 'string') return null;
+  const list = await buildAutomationsList();
+  return list.find((a) => a.id === id) || null;
+}
+
+// Run-now. cron -> fire the command detached (don't await); launchd -> kickstart.
+async function runAutomation(id) {
+  const a = await findAutomation(id);
+  if (!a) { const e = new Error('unknown automation id'); e.code = 'NOT_FOUND'; throw e; }
+  if (a.kind === 'cron') {
+    execCb(a.command, { cwd: HOME }, () => {}); // detached fire-and-forget
+    return { ok: true, started: true, id, kind: 'cron' };
+  }
+  await execFileP('launchctl', ['kickstart', '-k', `gui/${UID}/${a.label}`]);
+  return { ok: true, started: true, id, kind: 'launchd' };
+}
+
+// Read the last ~maxLines of a file without loading the whole thing.
+async function tailFile(fp, maxLines = 80, maxBytes = 200_000) {
+  const st = await fsp.stat(fp);
+  const start = Math.max(0, st.size - maxBytes);
+  const fh = await fsp.open(fp, 'r');
+  try {
+    const len = st.size - start;
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, start);
+    let text = buf.toString('utf8');
+    if (start > 0) { const nl = text.indexOf('\n'); if (nl >= 0) text = text.slice(nl + 1); }
+    return text.split('\n').slice(-maxLines);
+  } finally {
+    await fh.close();
+  }
+}
+
+async function automationLogs(id) {
+  const a = await findAutomation(id);
+  if (!a) { const e = new Error('unknown automation id'); e.code = 'NOT_FOUND'; throw e; }
+  if (!a.logPath) return { id, logPath: null, lines: [], note: 'no log path known for this automation' };
+  try {
+    const lines = await tailFile(a.logPath, 80);
+    return { id, logPath: a.logPath, lines };
+  } catch {
+    return { id, logPath: a.logPath, lines: [], note: 'log not readable' };
+  }
+}
+
+// Toggle a cron line: back up the full crontab first, then comment/uncomment
+// ONLY the exact matched line and reinstall via `crontab <file>`.
+async function toggleCron(a, enabled) {
+  if (a.enabled === enabled) return { ok: true, id: a.id, kind: 'cron', enabled, note: 'already in desired state' };
+
+  const { stdout: raw } = await execP('crontab -l 2>/dev/null');
+  const lines = raw.split('\n');
+  const matches = lines.filter((l) => l === a.rawLine).length;
+  if (matches === 0) { const e = new Error('could not locate the crontab line to toggle'); e.code = 'NOT_FOUND'; throw e; }
+  if (matches !== 1) { const e = new Error('ambiguous crontab line — refusing to edit'); e.code = 'INVALID'; throw e; }
+  const idx = lines.findIndex((l) => l === a.rawLine);
+  const newLine = enabled ? a.rawLine.replace(/^\s*#+\s?/, '') : '# ' + a.rawLine;
+
+  // Back up BEFORE writing.
+  await fsp.mkdir(CRON_BACKUP_DIR, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = path.join(CRON_BACKUP_DIR, `${ts}.txt`);
+  await writeSecretFile(backupPath, raw);
+
+  lines[idx] = newLine;
+  const tmp = path.join(os.tmpdir(), `crontab-${process.pid}-${Date.now()}.txt`);
+  await fsp.writeFile(tmp, lines.join('\n'), { mode: 0o600 });
+  try { await execFileP('crontab', [tmp]); }
+  finally { try { await fsp.unlink(tmp); } catch {} }
+
+  return { ok: true, id: a.id, kind: 'cron', enabled, backup: backupPath };
+}
+
+async function toggleAutomation(id, enabled) {
+  if (typeof enabled !== 'boolean') { const e = new Error('enabled must be boolean'); e.code = 'INVALID'; throw e; }
+  const a = await findAutomation(id);
+  if (!a) { const e = new Error('unknown automation id'); e.code = 'NOT_FOUND'; throw e; }
+  if (a.kind === 'cron') return toggleCron(a, enabled);
+  await execFileP('launchctl', [enabled ? 'enable' : 'disable', `gui/${UID}/${a.label}`]);
+  return { ok: true, id, kind: 'launchd', enabled };
+}
+
+// ---------- MCP connections ----------
+
+function mcpTransport(s) {
+  if (s && typeof s.type === 'string') {
+    const t = s.type.toLowerCase();
+    if (t === 'stdio' || t === 'http' || t === 'sse') return t;
+  }
+  if (s && s.url) return /sse/i.test(s.url) ? 'sse' : 'http';
+  if (s && s.command) return 'stdio';
+  return 'unknown';
+}
+
+// Summary target: url -> host, stdio -> command basename.
+function mcpTarget(s) {
+  if (s && s.url) { try { return new URL(s.url).host; } catch { return '(url)'; } }
+  if (s && s.command) return path.basename(String(s.command));
+  return null;
+}
+
+// Read MCP servers from ~/.claude.json (+ ~/.mcp.json). This is a LOCAL,
+// localhost-only management tool on the owner's own machine — it returns the
+// FULL server config (command, args, env, url, headers — including API keys /
+// tokens) so the user can view and manage their own connections. Not stripped.
+async function buildMcpList() {
+  const out = { counts: { user: 0, project: 0 }, user: [], project: [] };
+  const readJson = async (fp) => { try { return JSON.parse(await fsp.readFile(fp, 'utf8')); } catch { return null; } };
+
+  const entry = (name, scope, s, extra = {}) => ({
+    name, scope,
+    transport: mcpTransport(s),
+    target: mcpTarget(s),
+    command: s?.command ?? null,
+    args: s?.args ?? null,
+    env: s?.env ?? null,        // full env incl. secrets — owner's own machine
+    url: s?.url ?? null,
+    headers: s?.headers ?? null, // full headers incl. auth tokens
+    type: s?.type ?? null,
+    ...extra,
+  });
+
+  const merge = (src) => {
+    if (!src || typeof src !== 'object') return;
+    const us = src.mcpServers;
+    if (us && typeof us === 'object') {
+      for (const [name, s] of Object.entries(us)) {
+        out.user.push(entry(name, 'user', s));
+      }
+    }
+    const projs = src.projects;
+    if (projs && typeof projs === 'object') {
+      for (const [ppath, pv] of Object.entries(projs)) {
+        const ps = pv && pv.mcpServers;
+        if (ps && typeof ps === 'object') {
+          for (const [name, s] of Object.entries(ps)) {
+            out.project.push(entry(name, 'project', s, { project: path.basename(ppath) }));
+          }
+        }
+      }
+    }
+  };
+
+  merge(await readJson(path.join(HOME, '.claude.json')));
+  merge(await readJson(path.join(HOME, '.mcp.json')));
+  out.counts.user = out.user.length;
+  out.counts.project = out.project.length;
+  return out;
+}
+
+// ---------- Skills ----------
+
+// Minimal YAML-ish frontmatter parser (handles folded multiline values).
+function parseFrontmatter(text) {
+  const m = text.match(/^﻿?---\s*\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return {};
+  const obj = {};
+  let curKey = null;
+  for (const line of m[1].split(/\r?\n/)) {
+    const km = line.match(/^([A-Za-z0-9_-]+):\s?(.*)$/);
+    if (km && !/^\s/.test(line)) { curKey = km[1]; obj[curKey] = km[2]; }
+    else if (curKey && /^\s+\S/.test(line)) { obj[curKey] += ' ' + line.trim(); }
+  }
+  return obj;
+}
+
+// Enumerate SKILL.md-bearing subdirs under ~/.claude/skills and ~/.codex/skills.
+async function buildSkillsList() {
+  const roots = [
+    { source: 'claude', dir: path.join(HOME, '.claude', 'skills') },
+    { source: 'codex', dir: path.join(HOME, '.codex', 'skills') },
+  ];
+  const skills = [];
+  const counts = { claude: 0, codex: 0 };
+
+  for (const { source, dir } of roots) {
+    let entries = [];
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      // Accept real dirs AND symlinks-to-dirs (codex skills are often symlinks
+      // into ~/.claude/skills). isDirectory() is false for symlinks, so a plain
+      // isDirectory() gate silently drops them.
+      if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+      if (e.name.startsWith('.')) continue;
+      let text;
+      try { text = await fsp.readFile(path.join(dir, e.name, 'SKILL.md'), 'utf8'); } catch { continue; }
+      const fm = parseFrontmatter(text);
+      let name = ((fm.name && fm.name.trim()) || e.name).replace(/^["']|["']$/g, '');
+      let description = (fm.description || '').replace(/^["']|["']$/g, '').trim();
+      if (description) {
+        const sentence = description.match(/^(.*?[.!?])(\s|$)/);
+        let d = sentence ? sentence[1] : description;
+        if (d.length > 200) d = d.slice(0, 200).trim() + '…';
+        description = d;
+      }
+      skills.push({ source, name, description, dir: e.name });
+      counts[source]++;
+    }
+  }
+  return { counts, skills };
+}
+
 // ---------- http server ----------
 
 const DASHBOARD_HTML = path.join(__dirname, 'dashboard.html');
@@ -1140,7 +2167,26 @@ const server = http.createServer(async (req, res) => {
           byEmail.set(key, a);
         }
       }
-      const accounts = [...byEmail.values()];
+      // Tag every Claude account with provider + unified id/label fields
+      // (keeping `service`/`email` for backward-compat with the existing UI).
+      const claudeAccounts = [...byEmail.values()].map((a) => ({
+        provider: 'claude',
+        id: a.service,
+        label: a.email || registry[a.service]?.label || null,
+        ...a,
+      }));
+
+      // Append Codex accounts (provider:'codex'). Never crash if ~/.codex is
+      // absent — buildCodexAccountsList returns [] and the UI shows a
+      // "Connect Codex" prompt instead.
+      let codexAccounts = [];
+      try {
+        codexAccounts = await buildCodexAccountsList();
+      } catch (e) {
+        console.log(`[accounts] codex build skipped: ${e.message}`);
+      }
+
+      const accounts = [...claudeAccounts, ...codexAccounts];
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(accounts));
@@ -1149,6 +2195,30 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/accounts/activate' && req.method === 'POST') {
       const body = await readJsonBody(req);
+
+      // Codex switch (file-based). Body: { provider:'codex', id }.
+      if (body && body.provider === 'codex') {
+        if (!body.id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'id is required' }));
+          return;
+        }
+        try {
+          const result = await activateCodexAccount(body.id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            ...result,
+            note: 'Running codex sessions must be restarted to pick up the new account — new sessions read ~/.codex/auth.json fresh.',
+          }));
+        } catch (e) {
+          console.log(`[accounts/activate codex] failed: ${e.code || ''} ${e.message}`);
+          res.writeHead(e.code === 'NOT_FOUND' ? 404 : 400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
+
+      // Claude switch (keychain). Backward-compatible: no provider => claude.
       if (!body || !body.service) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'service is required' }));
@@ -1297,6 +2367,27 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/accounts/remove' && req.method === 'POST') {
       const body = await readJsonBody(req);
+
+      // Codex remove (delete stash file + registry entry). Body: { provider:'codex', id }.
+      if (body && body.provider === 'codex') {
+        if (!body.id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'id is required' }));
+          return;
+        }
+        try {
+          const result = await removeCodexAccount(body.id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(result));
+        } catch (e) {
+          console.log(`[accounts/remove codex] failed: ${e.code || ''} ${e.message}`);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: e.message }));
+        }
+        return;
+      }
+
+      // Claude remove (keychain). Backward-compatible.
       if (!body || !body.service) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'service is required' }));
@@ -1311,6 +2402,118 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       }
+      return;
+    }
+
+    // Codex "add account" (import/stash only — the browser OAuth login flow is
+    // a LATER task and is intentionally NOT built here). Body:
+    //   { importActive: true, label? }             stash the live ~/.codex/auth.json
+    //   { json: <auth.json string|object>, label? } stash a pasted blob
+    if (url.pathname === '/api/accounts/codex-import' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      if (!body || (!body.json && !body.importActive)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'json or importActive is required' }));
+        return;
+      }
+      try {
+        const account = await importCodexAccount({
+          json: body.json,
+          importActive: !!body.importActive,
+          label: body.label,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(account));
+      } catch (e) {
+        console.log(`[accounts/codex-import] failed: ${e.code || ''} ${e.message}`);
+        res.writeHead(e.code === 'NOT_FOUND' ? 404 : 400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // ---------- Automations ----------
+
+    if (url.pathname === '/api/automations' && req.method === 'GET') {
+      const list = await buildAutomationsList();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(list));
+      return;
+    }
+
+    if (url.pathname === '/api/automations/run' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      if (!body || !body.id) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'id is required' }));
+        return;
+      }
+      try {
+        const result = await runAutomation(body.id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        console.log(`[automations/run] failed: ${e.code || ''} ${e.message}`);
+        res.writeHead(e.code === 'NOT_FOUND' ? 400 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/automations/logs' && (req.method === 'POST' || req.method === 'GET')) {
+      let id;
+      if (req.method === 'GET') id = url.searchParams.get('id');
+      else { const body = await readJsonBody(req); id = body && body.id; }
+      if (!id) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'id is required' }));
+        return;
+      }
+      try {
+        const result = await automationLogs(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(e.code === 'NOT_FOUND' ? 400 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/automations/toggle' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      if (!body || !body.id || typeof body.enabled !== 'boolean') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'id and enabled (boolean) are required' }));
+        return;
+      }
+      try {
+        const result = await toggleAutomation(body.id, body.enabled);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        console.log(`[automations/toggle] failed: ${e.code || ''} ${e.message}`);
+        res.writeHead(e.code === 'NOT_FOUND' || e.code === 'INVALID' ? 400 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+      return;
+    }
+
+    // ---------- MCP connections ----------
+
+    if (url.pathname === '/api/mcp' && req.method === 'GET') {
+      const result = await buildMcpList();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    // ---------- Skills ----------
+
+    if (url.pathname === '/api/skills' && req.method === 'GET') {
+      const result = await buildSkillsList();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
       return;
     }
 

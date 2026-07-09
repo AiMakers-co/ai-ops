@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Claude Sessions</title>
+<title>AI Ops — Command Center</title>
 <style>
   :root {
     /* AI Makers brand — cream + terracotta (light mode default) */
@@ -17,8 +17,11 @@
     --accent-dark: #B35A3A;
     --accent-deep: #8A4530;
     --accent-soft: rgba(217,119,87,0.14);
+    --codex: #0FA47F;
+    --codex-soft: rgba(15,164,127,0.14);
     --user: #3b82f6;
     --assistant: #22C55E;
+    --grey: #9C9184;
     --danger: #EF4444;
   }
   @media (prefers-color-scheme: dark) {
@@ -34,6 +37,8 @@
       --accent-dark: #E8926F;
       --accent-deep: #E8926F;
       --accent-soft: rgba(217,119,87,0.20);
+      --codex: #2DBE9B;
+      --codex-soft: rgba(45,190,155,0.18);
     }
   }
   * { box-sizing: border-box; }
@@ -99,25 +104,30 @@
   .row .resume-btn:hover { background: var(--accent-soft); }
   .empty { color: var(--text-faint); text-align: center; padding: 60px 0; }
 
-  #modal-backdrop {
+  #modal-backdrop, #logs-backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,0.55);
     display: none; align-items: center; justify-content: center; z-index: 10;
   }
-  #modal-backdrop.open { display: flex; }
-  #modal {
+  #modal-backdrop.open, #logs-backdrop.open { display: flex; }
+  #modal, #logs-modal {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     width: min(760px, 92vw); height: min(82vh, 900px);
     display: flex; flex-direction: column; overflow: hidden;
   }
-  #modal-header {
+  #modal-header, #logs-header {
     padding: 14px 18px; border-bottom: 1px solid var(--border);
     display: flex; align-items: flex-start; gap: 12px;
   }
-  #modal-header .info { flex: 1; min-width: 0; }
-  #modal-header .mt { font-size: 14px; font-weight: 600; }
-  #modal-header .mp { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; }
-  #modal-header button { flex-shrink: 0; }
+  #modal-header .info, #logs-header .info { flex: 1; min-width: 0; }
+  #modal-header .mt, #logs-header .mt { font-size: 14px; font-weight: 600; }
+  #modal-header .mp, #logs-header .mp { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #modal-header button, #logs-header button { flex-shrink: 0; }
   #modal-body { flex: 1; overflow-y: auto; padding: 16px 18px; }
+  #logs-body {
+    flex: 1; overflow: auto; padding: 14px 18px;
+    font-family: "Courier New", monospace; font-size: 12px; line-height: 1.55;
+    white-space: pre; color: var(--text-mute); background: var(--bg);
+  }
   .turn { margin-bottom: 14px; display: flex; gap: 10px; }
   .turn .badge {
     flex-shrink: 0; width: 64px; font-size: 10.5px; text-transform: uppercase;
@@ -146,16 +156,20 @@
   .toast.show { opacity: 1; }
 
   /* nav tabs */
-  .tabs { display: flex; gap: 4px; margin-right: 8px; }
+  .tabs { display: flex; gap: 2px; margin-right: auto; }
   .tab-btn {
-    background: transparent; border: 1px solid transparent; color: var(--text-mute);
-    font-size: 13px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    color: var(--text-mute); font-size: 13px; font-weight: 500;
+    padding: 7px 13px; border-radius: 0; cursor: pointer;
   }
-  .tab-btn.active { background: var(--panel-2); border-color: var(--border); color: var(--text); }
-  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab-btn:hover { color: var(--text); border-color: transparent; }
+  .tab-btn.active:hover { border-bottom-color: var(--accent); }
+
+  /* views */
+  #accounts-view, #automations-view, #mcp-view, #skills-view { display: none; }
 
   /* accounts view */
-  #accounts-view { display: none; }
   #accounts-bar {
     display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
   }
@@ -163,6 +177,21 @@
   .hint {
     color: var(--text-faint); font-size: 11.5px; padding: 8px 0 16px;
   }
+  .group-head {
+    display: flex; align-items: center; gap: 9px; margin: 18px 0 12px;
+  }
+  .group-head:first-child { margin-top: 4px; }
+  .group-head h2 {
+    font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+    margin: 0; color: var(--text-mute);
+  }
+  .group-head .g-count { font-size: 11.5px; color: var(--text-faint); }
+  .provider-pill {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+    border-radius: 4px; padding: 2px 8px;
+  }
+  .provider-pill.claude { background: var(--accent-soft); color: var(--accent); }
+  .provider-pill.codex { background: var(--codex-soft); color: var(--codex); }
   .accounts-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px;
   }
@@ -170,10 +199,28 @@
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 16px 18px;
   }
-  .acct-card.needs-refresh { opacity: 0.55; }
+  .acct-card.codex-edge { border-left: 3px solid var(--codex); }
+  .acct-card.claude-edge { border-left: 3px solid var(--accent); }
+  .acct-card.needs-refresh { opacity: 0.6; }
   .acct-card.err { border-color: var(--danger); }
+  .acct-card.placeholder {
+    border: 1.5px dashed var(--border); background: transparent;
+    display: flex; flex-direction: column; gap: 8px; justify-content: center;
+  }
+  .acct-card.placeholder .ph-title { font-size: 14px; font-weight: 600; color: var(--codex); }
+  .acct-card.placeholder .ph-body { font-size: 12.5px; color: var(--text-mute); line-height: 1.5; }
+  .acct-card.placeholder .connect-codex-btn {
+    margin-top: 4px; align-self: flex-start; color: var(--codex);
+    border-color: var(--codex-soft); background: var(--codex-soft); font-weight: 600;
+  }
   .acct-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
   .acct-email { font-size: 14px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prov-tag {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+    border-radius: 3px; padding: 1px 6px; flex-shrink: 0;
+  }
+  .prov-tag.claude { background: var(--accent-soft); color: var(--accent); }
+  .prov-tag.codex { background: var(--codex-soft); color: var(--codex); }
   .plan-badge {
     font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em;
     background: var(--accent-soft); color: var(--accent); border-radius: 4px; padding: 2px 7px;
@@ -251,6 +298,116 @@
   }
   details.advanced-import summary:hover { color: var(--text); }
   details.advanced-import .add-account-box { margin-top: 10px; }
+
+  /* toolbar shared by automations / mcp / skills */
+  .view-bar {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .view-bar .summary { color: var(--text-mute); font-size: 12.5px; margin-right: auto; }
+  .view-bar .summary b { color: var(--text); font-weight: 700; }
+
+  /* automations */
+  .auto-list { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--panel); }
+  .auto-row {
+    display: flex; align-items: center; gap: 12px; padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .auto-row:last-child { border-bottom: none; }
+  .auto-row.disabled { opacity: 0.5; }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .status-dot.running { background: var(--assistant); box-shadow: 0 0 0 3px rgba(34,197,94,0.15); }
+  .status-dot.idle { background: var(--grey); }
+  .status-dot.error { background: var(--danger); box-shadow: 0 0 0 3px rgba(239,68,68,0.15); }
+  .auto-main { flex: 1; min-width: 0; }
+  .auto-name {
+    font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .auto-sub { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kind-badge {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+    border-radius: 3px; padding: 1px 6px; flex-shrink: 0;
+    background: var(--panel-2); color: var(--text-mute); border: 1px solid var(--border);
+  }
+  .kind-badge.cron { color: var(--user); }
+  .kind-badge.launchd { color: var(--accent); }
+  .disabled-tag {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+    color: var(--text-faint); border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px;
+  }
+  .auto-times { font-size: 11px; color: var(--text-mute); width: 150px; flex-shrink: 0; text-align: right; }
+  .auto-times div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .auto-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .auto-actions button { font-size: 11.5px; padding: 5px 9px; }
+  .auto-actions .run-btn { color: var(--accent); border-color: var(--accent-soft); background: transparent; }
+  .auto-actions .run-btn:hover { background: var(--accent-soft); }
+  .auto-actions .toggle-btn { color: var(--text-mute); background: transparent; }
+  .auto-actions .logs-btn { color: var(--text-mute); background: transparent; }
+
+  /* mcp */
+  .mcp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+  .mcp-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 0; overflow: hidden;
+  }
+  .mcp-card > summary {
+    list-style: none; cursor: pointer; padding: 11px 13px;
+    display: flex; align-items: center; gap: 9px;
+  }
+  .mcp-card > summary::-webkit-details-marker { display: none; }
+  .mcp-card > summary::before {
+    content: "▸"; color: var(--text-faint); font-size: 10px; flex-shrink: 0;
+    transition: transform 0.12s;
+  }
+  .mcp-card[open] > summary::before { content: "▾"; }
+  .mcp-card > summary:hover { background: var(--panel-2); }
+  .mcp-card .mcp-name { font-size: 13px; font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mcp-card .mcp-scope { font-size: 10px; color: var(--text-faint); flex-shrink: 0; }
+  .mcp-detail { padding: 4px 13px 13px 30px; border-top: 1px solid var(--border); }
+  .mcp-kv { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; font-size: 12px; }
+  .mcp-kv .k {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint);
+    width: 66px; flex-shrink: 0;
+  }
+  .mcp-kv .v {
+    font-family: "Courier New", monospace; font-size: 11.5px; color: var(--text-mute);
+    word-break: break-all; flex: 1; min-width: 0;
+  }
+  .mcp-sub-label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint);
+    margin: 12px 0 4px; font-weight: 700;
+  }
+  .secret-row {
+    display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 12px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
+  }
+  .secret-row .sk { font-family: "Courier New", monospace; font-size: 11px; color: var(--text-mute); flex-shrink: 0; }
+  .secret-row .seq { color: var(--text-faint); }
+  .secret-row .sv {
+    font-family: "Courier New", monospace; font-size: 11.5px; color: var(--text);
+    flex: 1; min-width: 0; word-break: break-all;
+  }
+  .secret-row button {
+    padding: 2px 7px; font-size: 11px; flex-shrink: 0; background: transparent; border-color: var(--border);
+  }
+  .secret-row button:hover { border-color: var(--accent); }
+  .transport-badge {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+    border-radius: 3px; padding: 1px 6px; flex-shrink: 0;
+    background: var(--panel-2); color: var(--text-mute); border: 1px solid var(--border);
+  }
+  .transport-badge.http, .transport-badge.sse { color: var(--user); }
+  .transport-badge.stdio { color: var(--accent); }
+  .reveal-all-btn { font-size: 12px; }
+
+  /* skills */
+  .skills-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+  .skill-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 11px 13px;
+  }
+  .skill-card .sk-name { font-size: 13px; font-weight: 700; margin-bottom: 3px; }
+  .skill-card .sk-desc { font-size: 11.5px; color: var(--text-mute); line-height: 1.45;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 </style>
 </head>
 <body>
@@ -266,11 +423,14 @@
       </g>
     </svg>
     <h1>AI Makers</h1>
-    <span class="brand-sub">· Claude Sessions</span>
+    <span class="brand-sub">· AI Ops</span>
   </div>
   <div class="tabs">
-    <button class="tab-btn active" id="tab-sessions">Sessions</button>
-    <button class="tab-btn" id="tab-accounts">Accounts</button>
+    <button class="tab-btn" data-tab="accounts">Accounts</button>
+    <button class="tab-btn" data-tab="automations">Automations</button>
+    <button class="tab-btn" data-tab="mcp">MCP</button>
+    <button class="tab-btn" data-tab="skills">Skills</button>
+    <button class="tab-btn" data-tab="recents">Recents</button>
   </div>
   <span class="count" id="count"></span>
   <input type="search" id="search" placeholder="Search title, prompt, project…" />
@@ -285,15 +445,11 @@
 </header>
 
 <main>
-  <div id="sessions-view">
-    <div id="list"></div>
-  </div>
-
+  <!-- Accounts -->
   <div id="accounts-view">
     <div id="accounts-bar">
-      <button class="add-account-btn" id="add-account-open-btn">＋ Add account</button>
+      <button class="add-account-btn" id="add-account-open-btn">＋ Add Claude account</button>
       <span class="last-updated" id="accounts-updated"></span>
-      <button id="accounts-refresh">Refresh</button>
     </div>
     <div class="hint">First run may prompt macOS Keychain access — click "Always Allow" for each account.</div>
 
@@ -309,7 +465,7 @@
       </div>
     </div>
 
-    <div class="accounts-grid" id="accounts-grid"></div>
+    <div id="accounts-groups"></div>
 
     <details class="advanced-import">
       <summary>Advanced: paste credential JSON</summary>
@@ -322,6 +478,37 @@
         </div>
       </div>
     </details>
+  </div>
+
+  <!-- Automations -->
+  <div id="automations-view">
+    <div class="view-bar">
+      <span class="summary" id="auto-summary"></span>
+    </div>
+    <div class="auto-list" id="auto-list"></div>
+  </div>
+
+  <!-- MCP -->
+  <div id="mcp-view">
+    <div class="view-bar">
+      <span class="summary" id="mcp-summary"></span>
+      <button class="reveal-all-btn" id="mcp-reveal-all">Reveal all secrets</button>
+    </div>
+    <div id="mcp-groups"></div>
+  </div>
+
+  <!-- Skills -->
+  <div id="skills-view">
+    <div class="view-bar">
+      <input type="search" id="skills-search" placeholder="Filter skills by name or description…" />
+      <span class="summary" id="skills-summary"></span>
+    </div>
+    <div id="skills-groups"></div>
+  </div>
+
+  <!-- Recents (sessions) -->
+  <div id="sessions-view">
+    <div id="list"></div>
   </div>
 </main>
 
@@ -339,6 +526,19 @@
   </div>
 </div>
 
+<div id="logs-backdrop">
+  <div id="logs-modal">
+    <div id="logs-header">
+      <div class="info">
+        <div class="mt" id="logs-title"></div>
+        <div class="mp" id="logs-path"></div>
+      </div>
+      <button id="logs-close">Close</button>
+    </div>
+    <div id="logs-body"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -349,10 +549,14 @@ function fmtRelative(iso) {
   const d = new Date(iso).getTime();
   const diff = Date.now() - d;
   const m = 60000, h = 3600000, day = 86400000;
-  if (diff < h) return Math.max(1, Math.round(diff / m)) + 'm ago';
-  if (diff < day) return Math.round(diff / h) + 'h ago';
-  if (diff < day * 30) return Math.round(diff / day) + 'd ago';
-  return new Date(iso).toLocaleDateString();
+  const future = diff < 0;
+  const a = Math.abs(diff);
+  let out;
+  if (a < h) out = Math.max(1, Math.round(a / m)) + 'm';
+  else if (a < day) out = Math.round(a / h) + 'h';
+  else if (a < day * 30) out = Math.round(a / day) + 'd';
+  else return new Date(iso).toLocaleDateString();
+  return future ? 'in ' + out : out + ' ago';
 }
 
 function fmtSize(bytes) {
@@ -367,9 +571,79 @@ function shortenPath(p) {
   return p.replace(/^\/Users\/[^/]+/, '~');
 }
 
-async function load() {
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function stripAnsi(s) {
+  return (s || '').replace(/\[[0-9;]*m/g, '');
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(showToast._h);
+  showToast._h = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function debounce(fn, ms) {
+  let h;
+  return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
+}
+
+// ============================ TAB SYSTEM ============================
+const TABS = ['accounts', 'automations', 'mcp', 'skills', 'recents'];
+const loaded = { accounts: false, automations: false, mcp: false, skills: false, recents: false };
+let activeTab = localStorage.getItem('dashTab');
+if (!TABS.includes(activeTab)) activeTab = 'accounts';
+
+const SESSION_CONTROLS = ['search', 'project', 'sort'];
+
+function showTab(tab) {
+  if (!TABS.includes(tab)) tab = 'accounts';
+  activeTab = tab;
+  localStorage.setItem('dashTab', tab);
+
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === tab);
+  });
+
+  const views = {
+    accounts: 'accounts-view', automations: 'automations-view',
+    mcp: 'mcp-view', skills: 'skills-view', recents: 'sessions-view',
+  };
+  Object.entries(views).forEach(([t, id]) => {
+    document.getElementById(id).style.display = (t === tab) ? 'block' : 'none';
+  });
+
+  // session controls + count only relevant on Recents
+  const showSess = tab === 'recents';
+  SESSION_CONTROLS.forEach(id => document.getElementById(id).style.display = showSess ? '' : 'none');
+  document.getElementById('count').style.display = showSess ? '' : 'none';
+
+  loadTab(tab, false);
+}
+
+function loadTab(tab, force) {
+  if (!force && loaded[tab]) return;
+  if (tab === 'accounts') loadAccounts();
+  else if (tab === 'automations') loadAutomations();
+  else if (tab === 'mcp') loadMCP();
+  else if (tab === 'skills') loadSkills();
+  else if (tab === 'recents') loadSessions();
+}
+
+document.querySelectorAll('.tab-btn').forEach(b => {
+  b.addEventListener('click', () => showTab(b.dataset.tab));
+});
+document.getElementById('refresh').addEventListener('click', () => loadTab(activeTab, true));
+
+// ============================ RECENTS (sessions) ============================
+async function loadSessions() {
   const res = await fetch('/api/sessions');
   sessions = await res.json();
+  loaded.recents = true;
   populateProjects();
   render();
 }
@@ -437,10 +711,6 @@ function render() {
   });
 }
 
-function escapeHtml(s) {
-  return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
 async function openSession(id) {
   const res = await fetch('/api/session/' + encodeURIComponent(id));
   const data = await res.json();
@@ -483,18 +753,9 @@ async function resumeSession(id) {
   if (data.error) showToast('Resume failed: ' + data.error);
 }
 
-function showToast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(showToast._h);
-  showToast._h = setTimeout(() => t.classList.remove('show'), 2200);
-}
-
 document.getElementById('search').addEventListener('input', debounce(render, 120));
 document.getElementById('project').addEventListener('change', render);
 document.getElementById('sort').addEventListener('change', render);
-document.getElementById('refresh').addEventListener('click', load);
 document.getElementById('modal-close').addEventListener('click', () => {
   document.getElementById('modal-backdrop').classList.remove('open');
 });
@@ -505,40 +766,7 @@ document.getElementById('modal-resume').addEventListener('click', (e) => {
   resumeSession(e.target.dataset.id);
 });
 
-function debounce(fn, ms) {
-  let h;
-  return (...args) => { clearTimeout(h); h = setTimeout(() => fn(...args), ms); };
-}
-
-// ---------- accounts view ----------
-
-let accountsLoaded = false;
-
-function showTab(tab) {
-  const sessionsControls = ['search', 'project', 'sort'];
-  if (tab === 'accounts') {
-    document.getElementById('tab-accounts').classList.add('active');
-    document.getElementById('tab-sessions').classList.remove('active');
-    document.getElementById('sessions-view').style.display = 'none';
-    document.getElementById('accounts-view').style.display = 'block';
-    sessionsControls.forEach(id => document.getElementById(id).style.display = 'none');
-    document.getElementById('count').style.display = 'none';
-    if (!accountsLoaded) loadAccounts();
-  } else {
-    document.getElementById('tab-sessions').classList.add('active');
-    document.getElementById('tab-accounts').classList.remove('active');
-    document.getElementById('sessions-view').style.display = 'block';
-    document.getElementById('accounts-view').style.display = 'none';
-    sessionsControls.forEach(id => document.getElementById(id).style.display = '');
-    document.getElementById('count').style.display = '';
-  }
-}
-
-document.getElementById('tab-sessions').addEventListener('click', () => showTab('sessions'));
-document.getElementById('tab-accounts').addEventListener('click', () => showTab('accounts'));
-document.getElementById('accounts-refresh').addEventListener('click', loadAccounts);
-document.getElementById('import-btn').addEventListener('click', importAccount);
-
+// ============================ ACCOUNTS ============================
 function fmtResetTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -549,7 +777,7 @@ function fmtResetTime(iso) {
 }
 
 function barColor(percent, severity) {
-  if (severity === 'high' || percent >= 90) return 'red';
+  if (severity === 'high' || severity === 'critical' || percent >= 90) return 'red';
   if (severity === 'warning' || percent >= 70) return 'amber';
   return 'green';
 }
@@ -571,42 +799,48 @@ function renderUsageRow(l) {
 // Degraded-but-not-blank usage line. Returns null when real usage bars should render.
 function usageNote(a) {
   if (a.usage) return null;
-  // A usage-endpoint error (incl. 429 throttling) means usage couldn't be
-  // fetched — NOT that the account is at its limit. Real at-limit shows as
-  // 100% bars from actual usage data.
   if (a.usageError) return 'Usage unavailable';
   return null;
 }
 
 function renderAccountCard(a) {
-  // needs_refresh: token expired, not switchable — minimal card, still visible.
-  if (a.status === 'needs_refresh') {
+  const provider = a.provider || 'claude';
+  const edge = provider === 'codex' ? 'codex-edge' : 'claude-edge';
+  const provTag = `<span class="prov-tag ${provider}">${provider === 'codex' ? 'Codex' : 'Claude'}</span>`;
+
+  // needs_refresh / token_expired: not switchable — minimal muted card, still visible.
+  if (a.status === 'needs_refresh' || a.status === 'token_expired') {
+    const msg = provider === 'codex'
+      ? 'Session expired — reconnect Codex'
+      : 'Session expired — re-add to refresh';
     return `
-      <div class="acct-card needs-refresh">
+      <div class="acct-card needs-refresh ${edge}">
         <div class="acct-head">
-          <div class="acct-email">${escapeHtml(a.email || a.service)}</div>
+          ${provTag}
+          <div class="acct-email">${escapeHtml(a.label || a.email || a.service)}</div>
         </div>
-        <div class="acct-service">${escapeHtml(a.service)}</div>
-        <div class="acct-note">Session expired — re-add to refresh</div>
+        <div class="acct-service">${escapeHtml(a.service || '')}</div>
+        <div class="acct-note">${escapeHtml(msg)}</div>
       </div>`;
   }
 
-  // status "ok" with usage:null (e.g. usageError:"429") and status "error" both
-  // render as a normal, switchable card — just swap the usage bars for a muted note.
   const limits = (a.usage && a.usage.limits) || [];
   const fiveHour = a.usage && a.usage.five_hour;
   const sevenDay = a.usage && a.usage.seven_day;
   const note = a.status === 'error' ? 'Usage unavailable — tap Refresh' : usageNote(a);
+  const displayName = a.email || a.label || a.service;
+  const dataAttrs = `data-provider="${provider}" data-id="${encodeURIComponent(a.id || a.service)}" data-service="${encodeURIComponent(a.service || '')}" data-label="${encodeURIComponent(a.label || displayName)}"`;
 
   return `
-    <div class="acct-card${a.status === 'error' ? ' err' : ''}">
+    <div class="acct-card ${edge}${a.status === 'error' ? ' err' : ''}">
       <div class="acct-head">
-        <div class="acct-email">${escapeHtml(a.email || a.service)}</div>
+        ${provTag}
+        <div class="acct-email">${escapeHtml(displayName)}</div>
         ${a.plan ? `<span class="plan-badge">${escapeHtml(a.plan)}</span>` : ''}
-        ${a.isActive ? '<span class="active-pill">Active</span>' : `<button class="make-active-btn" data-service="${encodeURIComponent(a.service)}" data-email="${encodeURIComponent(a.email || a.service)}">Make active</button>`}
-        ${a.isActive ? '' : `<button class="remove-btn" data-service="${encodeURIComponent(a.service)}" title="Remove account">Remove</button>`}
+        ${a.isActive ? '<span class="active-pill">Active</span>' : `<button class="make-active-btn" ${dataAttrs}>Make active</button>`}
+        ${a.isActive ? '' : `<button class="remove-btn" ${dataAttrs} title="Remove account">Remove</button>`}
       </div>
-      <div class="acct-service">${escapeHtml(a.service)}</div>
+      <div class="acct-service">${escapeHtml(a.service || a.id || '')}</div>
       ${note ? `<div class="usage-note">${escapeHtml(note)}</div>` : limits.map(renderUsageRow).join('')}
       ${(fiveHour || sevenDay) ? `
       <div class="acct-summary">
@@ -616,46 +850,100 @@ function renderAccountCard(a) {
     </div>`;
 }
 
+function codexPlaceholderCard() {
+  return `
+    <div class="acct-card placeholder codex-edge">
+      <div class="ph-title">＋ Connect Codex</div>
+      <div class="ph-body">Codex support is ready. Connect an account to see plan and usage here — import its credentials via <b>Advanced: paste credential JSON</b> below.</div>
+      <button class="connect-codex-btn" id="connect-codex-btn">Connect Codex</button>
+    </div>`;
+}
+
 async function loadAccounts() {
-  const grid = document.getElementById('accounts-grid');
-  grid.innerHTML = '<div class="empty">Loading accounts… (Keychain may prompt for access)</div>';
+  const wrap = document.getElementById('accounts-groups');
+  wrap.innerHTML = '<div class="empty">Loading accounts… (Keychain may prompt for access)</div>';
   try {
     const res = await fetch('/api/accounts');
     const accounts = await res.json();
-    accountsLoaded = true;
+    loaded.accounts = true;
     document.getElementById('accounts-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
 
-    if (!accounts.length) {
-      grid.innerHTML = '<div class="empty">No accounts found.</div>';
-      return;
-    }
+    const claude = accounts.filter(a => (a.provider || 'claude') === 'claude');
+    const codex = accounts.filter(a => a.provider === 'codex');
 
-    grid.innerHTML = accounts.map(renderAccountCard).join('');
-    grid.querySelectorAll('.make-active-btn').forEach(btn => {
-      btn.addEventListener('click', () => makeActive(decodeURIComponent(btn.dataset.service), decodeURIComponent(btn.dataset.email)));
+    let html = '';
+    // Claude group
+    html += `<div class="group-head"><span class="provider-pill claude">Claude</span><h2>Claude accounts</h2><span class="g-count">${claude.length}</span></div>`;
+    html += claude.length
+      ? `<div class="accounts-grid">${claude.map(renderAccountCard).join('')}</div>`
+      : '<div class="empty">No Claude accounts found.</div>';
+
+    // Codex group
+    html += `<div class="group-head"><span class="provider-pill codex">Codex</span><h2>Codex accounts</h2><span class="g-count">${codex.length}</span></div>`;
+    html += `<div class="accounts-grid">${codex.length ? codex.map(renderAccountCard).join('') : codexPlaceholderCard()}</div>`;
+
+    wrap.innerHTML = html;
+
+    wrap.querySelectorAll('.make-active-btn').forEach(btn => {
+      btn.addEventListener('click', () => makeActive(btn.dataset));
     });
-    grid.querySelectorAll('.remove-btn').forEach(btn => {
-      btn.addEventListener('click', () => removeAccount(decodeURIComponent(btn.dataset.service)));
+    wrap.querySelectorAll('.remove-btn').forEach(btn => {
+      btn.addEventListener('click', () => removeAccount(btn.dataset));
+    });
+    const cc = document.getElementById('connect-codex-btn');
+    if (cc) cc.addEventListener('click', () => {
+      const d = document.querySelector('details.advanced-import');
+      if (d) { d.open = true; d.scrollIntoView({ behavior: 'smooth' }); }
+      showToast('Paste Codex credential JSON to connect');
     });
   } catch (e) {
-    grid.innerHTML = '<div class="empty">Failed to load accounts.</div>';
+    wrap.innerHTML = '<div class="empty">Failed to load accounts.</div>';
   }
 }
 
-async function removeAccount(service) {
+async function makeActive(ds) {
+  const provider = ds.provider || 'claude';
+  const service = decodeURIComponent(ds.service || '');
+  const id = decodeURIComponent(ds.id || '');
+  const label = decodeURIComponent(ds.label || service || id);
+  const confirmed = confirm(
+    `Switch active account to ${label}? Claude Code will use this account for NEW sessions. ` +
+    `Running sessions keep their current account until restarted.`
+  );
+  if (!confirmed) return;
+
+  const body = provider === 'codex' ? { provider: 'codex', id } : { service };
+  showToast('Activating…');
+  try {
+    const res = await fetch('/api/accounts/activate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) { showToast('Activate failed: ' + data.error); return; }
+    showToast('Active account switched — restart running sessions to use it.');
+    loadAccounts();
+  } catch (e) {
+    showToast('Activate failed');
+  }
+}
+
+async function removeAccount(ds) {
+  const provider = ds.provider || 'claude';
+  const service = decodeURIComponent(ds.service || '');
+  const id = decodeURIComponent(ds.id || '');
   if (!confirm('Remove this account from the dashboard? This deletes its saved Keychain stash.')) return;
+  const body = provider === 'codex' ? { provider: 'codex', id } : { service };
   showToast('Removing…');
   try {
     const res = await fetch('/api/accounts/remove', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
-    if (data.error) {
-      showToast('Remove failed: ' + data.error);
-      return;
-    }
+    if (data.error) { showToast('Remove failed: ' + data.error); return; }
     showToast('Account removed');
     loadAccounts();
   } catch (e) {
@@ -663,8 +951,7 @@ async function removeAccount(service) {
   }
 }
 
-// ---------- one-click OAuth add-account flow ----------
-
+// ---------- one-click OAuth add-account flow (Claude) ----------
 let loginPoll = null;
 let lastAuthorizeUrl = null;
 
@@ -678,10 +965,7 @@ async function startLogin() {
   try {
     const res = await fetch('/api/accounts/login-start', { method: 'POST' });
     const data = await res.json();
-    if (data.error) {
-      showToast('Could not start login: ' + data.error);
-      return;
-    }
+    if (data.error) { showToast('Could not start login: ' + data.error); return; }
     lastAuthorizeUrl = data.authorizeUrl || null;
     document.getElementById('add-account-panel').style.display = 'block';
     if (loginPoll) clearInterval(loginPoll);
@@ -703,12 +987,9 @@ async function pollLoginStatus() {
       closeAddAccountPanel();
       showToast('Login failed: ' + (data.error || 'unknown error'));
     } else if (data.status === 'idle') {
-      // Server reset state without a terminal result — stop polling quietly.
       closeAddAccountPanel();
     }
-  } catch (e) {
-    // transient — keep polling
-  }
+  } catch (e) { /* transient */ }
 }
 
 document.getElementById('add-account-open-btn').addEventListener('click', startLogin);
@@ -717,33 +998,7 @@ document.getElementById('aap-open-link').addEventListener('click', (e) => {
   e.preventDefault();
   if (lastAuthorizeUrl) window.open(lastAuthorizeUrl, '_blank');
 });
-
-async function makeActive(service, email) {
-  const label = email || service;
-  const confirmed = confirm(
-    `Switch active account to ${label}? Claude Code will use this account for NEW sessions. ` +
-    `Running sessions keep their current account until restarted.`
-  );
-  if (!confirmed) return;
-
-  showToast('Activating…');
-  try {
-    const res = await fetch('/api/accounts/activate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service }),
-    });
-    const data = await res.json();
-    if (data.error) {
-      showToast('Activate failed: ' + data.error);
-      return;
-    }
-    showToast('Active account switched — restart running claude sessions to use it.');
-    loadAccounts();
-  } catch (e) {
-    showToast('Activate failed');
-  }
-}
+document.getElementById('import-btn').addEventListener('click', importAccount);
 
 async function importAccount() {
   const json = document.getElementById('import-json').value.trim();
@@ -756,10 +1011,7 @@ async function importAccount() {
       body: JSON.stringify({ json, label: label || undefined }),
     });
     const data = await res.json();
-    if (data.error) {
-      showToast('Import failed: ' + data.error);
-      return;
-    }
+    if (data.error) { showToast('Import failed: ' + data.error); return; }
     document.getElementById('import-json').value = '';
     document.getElementById('import-label').value = '';
     showToast('Account imported');
@@ -769,7 +1021,304 @@ async function importAccount() {
   }
 }
 
-load();
+// ============================ AUTOMATIONS ============================
+function autoStatusClass(a) {
+  if (a.lastExit !== 0 && a.lastExit != null) return 'error';
+  if (a.status === 'error') return 'error';
+  if (a.status === 'running') return 'running';
+  return 'idle';
+}
+
+async function loadAutomations() {
+  const list = document.getElementById('auto-list');
+  list.innerHTML = '<div class="empty">Loading automations…</div>';
+  try {
+    const res = await fetch('/api/automations');
+    const items = await res.json();
+    loaded.automations = true;
+
+    const running = items.filter(a => a.status === 'running').length;
+    const failed = items.filter(a => a.lastExit !== 0 && a.lastExit != null).length;
+    document.getElementById('auto-summary').innerHTML =
+      `<b>${items.length}</b> automations · <b>${running}</b> running · <b>${failed}</b> failed`;
+
+    if (!items.length) { list.innerHTML = '<div class="empty">No automations found.</div>'; return; }
+
+    list.innerHTML = items.map(a => {
+      const st = autoStatusClass(a);
+      const dis = !a.enabled;
+      const enc = encodeURIComponent(a.id);
+      return `
+        <div class="auto-row${dis ? ' disabled' : ''}">
+          <div class="status-dot ${st}" title="${st}"></div>
+          <div class="auto-main">
+            <div class="auto-name">
+              ${escapeHtml(a.name)}
+              <span class="kind-badge ${a.kind}">${escapeHtml(a.kind)}</span>
+              ${dis ? '<span class="disabled-tag">disabled</span>' : ''}
+            </div>
+            <div class="auto-sub">${escapeHtml(a.schedule || '')}${a.target ? ' · ' + escapeHtml(a.target) : ''}</div>
+          </div>
+          <div class="auto-times">
+            <div>next: ${escapeHtml(fmtRelative(a.nextRun))}</div>
+            <div>last: ${escapeHtml(fmtRelative(a.lastRun))}</div>
+          </div>
+          <div class="auto-actions">
+            <button class="run-btn" data-id="${enc}">Run now</button>
+            <button class="toggle-btn" data-id="${enc}" data-enabled="${a.enabled}">${a.enabled ? 'Disable' : 'Enable'}</button>
+            <button class="logs-btn" data-id="${enc}" data-name="${encodeURIComponent(a.name)}">Logs</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.run-btn').forEach(b =>
+      b.addEventListener('click', () => runAutomation(decodeURIComponent(b.dataset.id))));
+    list.querySelectorAll('.toggle-btn').forEach(b =>
+      b.addEventListener('click', () => toggleAutomation(decodeURIComponent(b.dataset.id), b.dataset.enabled !== 'true')));
+    list.querySelectorAll('.logs-btn').forEach(b =>
+      b.addEventListener('click', () => openLogs(decodeURIComponent(b.dataset.id), decodeURIComponent(b.dataset.name))));
+  } catch (e) {
+    list.innerHTML = '<div class="empty">Failed to load automations.</div>';
+  }
+}
+
+async function runAutomation(id) {
+  showToast('Starting…');
+  try {
+    const res = await fetch('/api/automations/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json();
+    if (data && data.error) { showToast('Run failed: ' + data.error); return; }
+    showToast('Started');
+    setTimeout(() => loadAutomations(), 800);
+  } catch (e) {
+    showToast('Run failed');
+  }
+}
+
+async function toggleAutomation(id, enabled) {
+  if (!confirm(`${enabled ? 'Enable' : 'Disable'} this automation? This modifies the ${id.startsWith('cron') ? 'crontab' : 'launchd job'}.`)) return;
+  showToast(enabled ? 'Enabling…' : 'Disabling…');
+  try {
+    const res = await fetch('/api/automations/toggle', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, enabled }),
+    });
+    const data = await res.json();
+    if (data && data.error) { showToast('Toggle failed: ' + data.error); return; }
+    showToast(enabled ? 'Enabled' : 'Disabled');
+    loadAutomations();
+  } catch (e) {
+    showToast('Toggle failed');
+  }
+}
+
+async function openLogs(id, name) {
+  document.getElementById('logs-title').textContent = name || 'Logs';
+  document.getElementById('logs-path').textContent = '';
+  const body = document.getElementById('logs-body');
+  body.textContent = 'Loading logs…';
+  document.getElementById('logs-backdrop').classList.add('open');
+  try {
+    const res = await fetch('/api/automations/logs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json();
+    let text;
+    if (typeof data === 'string') text = data;
+    else if (Array.isArray(data.lines)) text = data.lines.join('\n');
+    else if (typeof data.lines === 'string') text = data.lines;
+    else if (data.error) text = 'Error: ' + data.error;
+    else text = JSON.stringify(data, null, 2);
+    if (data && data.logPath) document.getElementById('logs-path').textContent = shortenPath(data.logPath);
+    body.textContent = stripAnsi(text) || '(no log output)';
+    body.scrollTop = body.scrollHeight;
+  } catch (e) {
+    body.textContent = 'Failed to load logs.';
+  }
+}
+
+document.getElementById('logs-close').addEventListener('click', () => {
+  document.getElementById('logs-backdrop').classList.remove('open');
+});
+document.getElementById('logs-backdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'logs-backdrop') e.target.classList.remove('open');
+});
+
+// ============================ MCP ============================
+// Secrets live in the DOM as data attributes (base64) so masking is purely
+// anti-shoulder-surf — the real value is always present, revealable, copyable.
+let mcpAllRevealed = false;
+
+function maskSecret(v) {
+  v = String(v == null ? '' : v);
+  if (!v) return '(empty)';
+  const tail = v.length > 4 ? v.slice(-4) : v;
+  return '••••••' + tail;
+}
+
+function b64(v) {
+  try { return btoa(unescape(encodeURIComponent(String(v == null ? '' : v)))); }
+  catch (e) { return ''; }
+}
+function unb64(v) {
+  try { return decodeURIComponent(escape(atob(v || ''))); } catch (e) { return ''; }
+}
+
+function secretRow(key, val) {
+  const enc = b64(val);
+  return `
+    <div class="secret-row" data-secret="${enc}">
+      <span class="sk">${escapeHtml(key)}</span><span class="seq">=</span>
+      <span class="sv">${escapeHtml(mcpAllRevealed ? String(val) : maskSecret(val))}</span>
+      <button class="sr-reveal">${mcpAllRevealed ? 'Hide' : 'Reveal'}</button>
+      <button class="sr-copy">Copy</button>
+    </div>`;
+}
+
+function kvRow(label, value) {
+  return `<div class="mcp-kv"><span class="k">${escapeHtml(label)}</span><span class="v">${escapeHtml(value)}</span></div>`;
+}
+
+function mcpCard(s) {
+  const tp = (s.transport || '').toLowerCase();
+  let detail = '';
+  if (s.command) detail += kvRow('command', s.command);
+  if (Array.isArray(s.args) && s.args.length) detail += kvRow('args', s.args.join('  '));
+  if (s.url) detail += kvRow('url', s.url);
+  if (s.type) detail += kvRow('type', s.type);
+  if (s.project) detail += kvRow('project', s.project);
+
+  const env = s.env && typeof s.env === 'object' ? Object.entries(s.env) : [];
+  if (env.length) {
+    detail += '<div class="mcp-sub-label">Environment</div>';
+    detail += env.map(([k, v]) => secretRow(k, v)).join('');
+  }
+  const headers = s.headers && typeof s.headers === 'object' ? Object.entries(s.headers) : [];
+  if (headers.length) {
+    detail += '<div class="mcp-sub-label">Headers</div>';
+    detail += headers.map(([k, v]) => secretRow(k, v)).join('');
+  }
+  if (!detail) detail = '<div class="mcp-kv"><span class="v" style="color:var(--text-faint)">No additional config.</span></div>';
+
+  const scope = s.project ? `${s.scope} · ${s.project}` : s.scope;
+  return `
+    <details class="mcp-card">
+      <summary>
+        <span class="mcp-name">${escapeHtml(s.name)}</span>
+        <span class="mcp-scope">${escapeHtml(scope || '')}</span>
+        <span class="transport-badge ${tp}">${escapeHtml(s.transport || '')}</span>
+      </summary>
+      <div class="mcp-detail">${detail}</div>
+    </details>`;
+}
+
+function wireSecretRows(root) {
+  root.querySelectorAll('.secret-row').forEach(row => {
+    const real = () => unb64(row.dataset.secret);
+    const sv = row.querySelector('.sv');
+    const revealBtn = row.querySelector('.sr-reveal');
+    let shown = mcpAllRevealed;
+    const apply = () => {
+      sv.textContent = shown ? real() : maskSecret(real());
+      revealBtn.textContent = shown ? 'Hide' : 'Reveal';
+    };
+    revealBtn.addEventListener('click', () => { shown = !shown; apply(); });
+    row.querySelector('.sr-copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(real());
+        showToast('Copied to clipboard');
+      } catch (e) {
+        showToast('Copy failed');
+      }
+    });
+  });
+}
+
+async function loadMCP() {
+  const wrap = document.getElementById('mcp-groups');
+  wrap.innerHTML = '<div class="empty">Loading MCP servers…</div>';
+  try {
+    const res = await fetch('/api/mcp');
+    const data = await res.json();
+    loaded.mcp = true;
+    const user = data.user || [];
+    const project = data.project || [];
+    const uc = (data.counts && data.counts.user) != null ? data.counts.user : user.length;
+    const pc = (data.counts && data.counts.project) != null ? data.counts.project : project.length;
+    document.getElementById('mcp-summary').innerHTML =
+      `<b>${uc}</b> user · <b>${pc}</b> project servers`;
+
+    wrap.innerHTML =
+      `<div class="group-head"><h2>User servers</h2><span class="g-count">${uc}</span></div>` +
+      `<div class="mcp-grid">${user.map(mcpCard).join('') || '<div class="empty">None</div>'}</div>` +
+      `<div class="group-head"><h2>Project servers</h2><span class="g-count">${pc}</span></div>` +
+      `<div class="mcp-grid">${project.map(mcpCard).join('') || '<div class="empty">None</div>'}</div>`;
+
+    wireSecretRows(wrap);
+  } catch (e) {
+    wrap.innerHTML = '<div class="empty">Failed to load MCP servers.</div>';
+  }
+}
+
+document.getElementById('mcp-reveal-all').addEventListener('click', () => {
+  mcpAllRevealed = !mcpAllRevealed;
+  document.getElementById('mcp-reveal-all').textContent =
+    mcpAllRevealed ? 'Hide all secrets' : 'Reveal all secrets';
+  // re-render current MCP data (cheap; re-fetch to keep it simple & correct)
+  if (loaded.mcp) loadMCP();
+});
+
+// ============================ SKILLS ============================
+let allSkills = [];
+
+function renderSkills() {
+  const q = document.getElementById('skills-search').value.trim().toLowerCase();
+  const wrap = document.getElementById('skills-groups');
+  const match = s => !q ||
+    (s.name || '').toLowerCase().includes(q) ||
+    (s.description || '').toLowerCase().includes(q);
+
+  const claude = allSkills.filter(s => (s.source || 'claude') === 'claude' && match(s));
+  const codex = allSkills.filter(s => s.source === 'codex' && match(s));
+
+  document.getElementById('skills-summary').innerHTML =
+    `<b>${claude.length + codex.length}</b> shown`;
+
+  const card = s => `
+    <div class="skill-card">
+      <div class="sk-name">${escapeHtml(s.name)}</div>
+      <div class="sk-desc">${escapeHtml(s.description || '')}</div>
+    </div>`;
+
+  wrap.innerHTML =
+    `<div class="group-head"><span class="provider-pill claude">Claude</span><h2>Claude skills</h2><span class="g-count">${claude.length}</span></div>` +
+    `<div class="skills-grid">${claude.map(card).join('') || '<div class="empty">No matches</div>'}</div>` +
+    `<div class="group-head"><span class="provider-pill codex">Codex</span><h2>Codex skills</h2><span class="g-count">${codex.length}</span></div>` +
+    `<div class="skills-grid">${codex.map(card).join('') || '<div class="empty">No matches</div>'}</div>`;
+}
+
+async function loadSkills() {
+  const wrap = document.getElementById('skills-groups');
+  wrap.innerHTML = '<div class="empty">Loading skills…</div>';
+  try {
+    const res = await fetch('/api/skills');
+    const data = await res.json();
+    loaded.skills = true;
+    allSkills = data.skills || [];
+    renderSkills();
+  } catch (e) {
+    wrap.innerHTML = '<div class="empty">Failed to load skills.</div>';
+  }
+}
+
+document.getElementById('skills-search').addEventListener('input', debounce(renderSkills, 100));
+
+// ============================ INIT ============================
+showTab(activeTab);
 </script>
 </body>
 </html>
