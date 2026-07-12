@@ -283,11 +283,36 @@ struct Session: Codable, Identifiable {
     let lastTimestamp: String?
     let userCount: Int?
     let assistantCount: Int?
+    let account: String?           // owning account email/slug for per-account (CLAUDE_CONFIG_DIR) sessions; nil = global
 
     var projectBasename: String {
         guard let cwd = cwd, !cwd.isEmpty else { return "" }
         return (cwd as NSString).lastPathComponent
     }
+
+    // Short account tag for the RECENTS row (local-part of the email, else slug).
+    var accountTag: String? {
+        guard let a = account, !a.isEmpty else { return nil }
+        if let at = a.firstIndex(of: "@") { return String(a[..<at]) }
+        return a
+    }
+}
+
+// Running claude CLI sessions summary (/api/claude/running) — drives whether the
+// switch confirm offers the migration choices.
+struct RunningInfo: Codable {
+    let count: Int?            // migratable (non-pinned, mappable) running sessions
+    let pinned: Int?
+    let unmappable: Int?
+}
+
+// Live migration status (/api/migration) for the footer indicator.
+struct MigrationStatus: Codable {
+    let active: Bool?
+    let mode: String?
+    let total: Int?
+    let done: Int?
+    let remaining: Int?
 }
 
 struct Automation: Codable, Identifiable {
@@ -442,13 +467,32 @@ actor API {
     func resume(_ id: String) async throws { try await post("/api/resume/\(id)") }
 
     // Provider-aware activate: Claude switches by {service}; Codex by
-    // {provider:"codex", id}. Both hit /api/accounts/activate.
-    func activate(_ acc: Account) async throws {
+    // {provider:"codex", id}. Both hit /api/accounts/activate. `migrate` (Claude
+    // only) is "idle" | "now" | "none" for running-session handling.
+    func activate(_ acc: Account, migrate: String = "none") async throws {
         if acc.isCodex {
             try await post("/api/accounts/activate", body: ["provider": "codex", "id": acc.id])
         } else {
-            try await post("/api/accounts/activate", body: ["service": acc.service])
+            try await post("/api/accounts/activate", body: ["service": acc.service, "migrate": migrate])
         }
+    }
+
+    func getRunning() async throws -> RunningInfo {
+        var req = URLRequest(url: url("/api/claude/running"))
+        req.timeoutInterval = 8
+        let (data, _) = try await URLSession.shared.data(for: req)
+        return try JSONDecoder().decode(RunningInfo.self, from: data)
+    }
+
+    func getMigration() async throws -> MigrationStatus {
+        var req = URLRequest(url: url("/api/migration"))
+        req.timeoutInterval = 8
+        let (data, _) = try await URLSession.shared.data(for: req)
+        return try JSONDecoder().decode(MigrationStatus.self, from: data)
+    }
+
+    func openTerminal(_ service: String) async throws {
+        try await post("/api/accounts/open-terminal", body: ["service": service])
     }
     func loginStart() async throws { try await post("/api/accounts/login-start") }
     func removeAccount(_ service: String) async throws { try await post("/api/accounts/remove", body: ["service": service]) }
@@ -535,9 +579,14 @@ final class AppState: ObservableObject {
     @Published var lastError: String?
     @Published var loginWaiting = false   // one-click OAuth: browser sign-in in progress
     @Published var startAtLogin = false
+    @Published var runningClaudeCount = 0  // migratable running claude CLI sessions
+    @Published var migration: MigrationStatus? = nil  // live migration indicator
 
     private var timer: Timer?
     private var loginPollTask: Task<Void, Never>?
+    private var migrationPollTask: Task<Void, Never>?
+
+    var migrationActive: Bool { migration?.active ?? false }
 
     var activeAccount: Account? { accounts.first(where: { $0.active }) ?? accounts.first }
 
@@ -584,6 +633,15 @@ final class AppState: ObservableObject {
         } catch {
             self.lastError = "accounts: \(error.localizedDescription)"
         }
+        await loadRunning()
+    }
+
+    // Refresh the migratable running-session count so the switch confirm knows
+    // whether to offer the migration choices. Non-fatal.
+    func loadRunning() async {
+        if let info = try? await API.shared.getRunning() {
+            self.runningClaudeCount = info.count ?? 0
+        }
     }
 
     func loadSessions() async {
@@ -604,11 +662,42 @@ final class AppState: ObservableObject {
         }
     }
 
-    func activate(_ acc: Account) {
+    // migrate: "idle" (graceful when idle) | "now" (restart running immediately)
+    // | "none" (leave running sessions on the old account).
+    func activate(_ acc: Account, migrate: String = "none") {
         Task {
-            try? await API.shared.activate(acc)
+            try? await API.shared.activate(acc, migrate: migrate)
             await loadAccounts()
+            if !acc.isCodex && migrate != "none" { startMigrationPolling() }
         }
+    }
+
+    // Poll /api/migration while a migration is in flight so the footer shows a
+    // live "migrating N sessions…" indicator that clears when done.
+    private func startMigrationPolling() {
+        migrationPollTask?.cancel()
+        migrationPollTask = Task { [weak self] in
+            for _ in 0..<400 { // ~ up to 33 min at 5s cadence (covers the server's 30-min idle cap)
+                guard let self = self else { return }
+                if Task.isCancelled { return }
+                if let m = try? await API.shared.getMigration() {
+                    self.migration = m
+                    if !(m.active ?? false) {
+                        // one last account refresh, then clear the indicator shortly after
+                        await self.loadAccounts()
+                        try? await Task.sleep(nanoseconds: 4_000_000_000)
+                        self.migration = nil
+                        return
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            self?.migration = nil
+        }
+    }
+
+    func openTerminal(_ acc: Account) {
+        Task { try? await API.shared.openTerminal(acc.service) }
     }
 
     func resume(_ id: String) {
@@ -788,6 +877,11 @@ struct AccountUsageBlock: View {
 
 struct ContentView: View {
     @EnvironmentObject var state: AppState
+    // Inline confirmations for the MANAGE column. NSAlert.runModal() is unusable
+    // from a menu-bar popover (the dialog opens unfocused behind other windows),
+    // so confirm/cancel renders directly under the account row instead.
+    @State private var pendingSwitchId: String? = nil
+    @State private var pendingRemoveId: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -896,9 +990,8 @@ struct ContentView: View {
     }
 
     // Column 3 — add account, plus set-active/remove per account (list only;
-    // caption is pinned by the parent column). No behavior changes: still
-    // goes through the existing confirmSwitch/confirmRemove NSAlerts and the
-    // existing one-click loginStart + poll flow.
+    // caption is pinned by the parent column). Set-active/remove confirm INLINE
+    // under the row; add-account keeps the one-click loginStart + poll flow.
     @ViewBuilder private var manageList: some View {
         VStack(alignment: .leading, spacing: 10) {
             if state.loginWaiting {
@@ -922,29 +1015,59 @@ struct ContentView: View {
             SandRule()
 
             ForEach(state.accounts) { acc in
-                HStack(spacing: 8) {
-                    ProviderTag(account: acc)
-                    Text(acc.displayName).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
-                    Spacer()
-                    if acc.active {
-                        Text("✓ Active")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(acc.isCodex ? Brand.codexTeal : Brand.terracotta)
-                    } else if acc.isSwitchable {
-                        Button("Set active") { confirmSwitch(acc) }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        ProviderTag(account: acc)
+                        Text(acc.displayName).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
+                        Spacer()
+                        if acc.active {
+                            Text("✓ Active")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(acc.isCodex ? Brand.codexTeal : Brand.terracotta)
+                        } else if acc.isSwitchable {
+                            Button("Set active") {
+                                pendingSwitchId = acc.id
+                                pendingRemoveId = nil
+                            }
                             .buttonStyle(TerracottaLinkStyle(size: 11))
-                    } else {
-                        Text(acc.isCodex ? "Reconnect" : "Needs refresh")
-                            .font(.system(size: 11)).foregroundStyle(Brand.inkMute)
-                    }
-                    if !acc.active {
-                        Button {
-                            confirmRemove(acc)
-                        } label: {
-                            Image(systemName: "trash").font(.system(size: 11))
+                        } else {
+                            Text(acc.isCodex ? "Reconnect" : "Needs refresh")
+                                .font(.system(size: 11)).foregroundStyle(Brand.inkMute)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Brand.inkMute)
+                        // Open an isolated per-account terminal (Claude only —
+                        // Codex has no CLAUDE_CONFIG_DIR isolation).
+                        if !acc.isCodex && acc.isSwitchable {
+                            Button {
+                                state.openTerminal(acc)
+                            } label: {
+                                Image(systemName: "terminal").font(.system(size: 11))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Brand.inkMute)
+                            .help("Open a new terminal signed in as this account")
+                        }
+                        if !acc.active {
+                            Button {
+                                pendingRemoveId = acc.id
+                                pendingSwitchId = nil
+                            } label: {
+                                Image(systemName: "trash").font(.system(size: 11))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Brand.inkMute)
+                        }
+                    }
+                    if pendingSwitchId == acc.id {
+                        switchConfirm(acc)
+                    }
+                    if pendingRemoveId == acc.id {
+                        inlineConfirm(
+                            message: "Remove \(acc.displayName)? This deletes the stored credentials for this account.",
+                            actionLabel: "Remove",
+                            destructive: true,
+                            onConfirm: { state.remove(acc.service); pendingRemoveId = nil },
+                            onCancel: { pendingRemoveId = nil }
+                        )
                     }
                 }
                 .opacity(acc.status == "needs_refresh" ? 0.55 : 1.0)
@@ -953,31 +1076,99 @@ struct ContentView: View {
         }
     }
 
-    private func confirmSwitch(_ acc: Account) {
-        let alert = NSAlert()
-        alert.messageText = "Switch active account?"
-        let tool = acc.isCodex ? "Codex" : "Claude Code"
-        alert.informativeText = "Switch to \(acc.displayName)? \(tool) will use this account for new sessions. Running sessions keep their current account until restarted."
-        alert.alertStyle = .warning
-        // Cancel added first so it's the default/highlighted button and binds
-        // to Return/Escape — switching is a deliberate action, not the default.
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Switch")
-        if alert.runModal() == .alertSecondButtonReturn {
-            state.activate(acc)
+    // Compact confirm strip rendered inside the popover, under the row it belongs to.
+    @ViewBuilder private func inlineConfirm(
+        message: String, actionLabel: String, destructive: Bool,
+        onConfirm: @escaping () -> Void, onCancel: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(message)
+                .font(.system(size: 10))
+                .foregroundStyle(Brand.inkMute)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                Button(actionLabel, action: onConfirm)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(destructive ? Color(red: 0.937, green: 0.267, blue: 0.267) : Brand.terracotta)
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Brand.inkMute)
+                Spacer()
+            }
         }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Brand.cream))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Brand.sand, lineWidth: 1))
     }
 
-    private func confirmRemove(_ acc: Account) {
-        let alert = NSAlert()
-        alert.messageText = "Remove account \(acc.displayName)?"
-        alert.informativeText = "This removes the stored credentials for this account."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        if alert.runModal() == .alertFirstButtonReturn {
-            state.remove(acc.service)
+    // Switch confirm. With NO running claude sessions it's a plain confirm.
+    // With running sessions it offers the three migration choices (feature 1).
+    @ViewBuilder private func switchConfirm(_ acc: Account) -> some View {
+        let running = state.runningClaudeCount
+        VStack(alignment: .leading, spacing: 8) {
+            if acc.isCodex || running == 0 {
+                Text("Switch to \(acc.displayName)? \(acc.isCodex ? "Codex" : "Claude Code") uses it for new sessions; running sessions keep theirs until restarted.")
+                    .font(.system(size: 10)).foregroundStyle(Brand.inkMute)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Button("Switch") { state.activate(acc, migrate: "none"); pendingSwitchId = nil }
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .bold)).foregroundStyle(Brand.terracotta)
+                    Button("Cancel") { pendingSwitchId = nil }
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.inkMute)
+                    Spacer()
+                }
+            } else {
+                Text("Switch to \(acc.displayName)? \(running) running session\(running == 1 ? "" : "s") on the current account:")
+                    .font(.system(size: 10)).foregroundStyle(Brand.inkMute)
+                    .fixedSize(horizontal: false, vertical: true)
+                choiceButton(
+                    title: "Switch, migrate running when idle",
+                    subtitle: "Resumes each session on the new account once it stops working (recommended).",
+                    emphasized: true
+                ) { state.activate(acc, migrate: "idle"); pendingSwitchId = nil }
+                choiceButton(
+                    title: "Switch + restart running NOW",
+                    subtitle: "Cancels active runs immediately, then resumes them on the new account.",
+                    emphasized: false
+                ) { state.activate(acc, migrate: "now"); pendingSwitchId = nil }
+                choiceButton(
+                    title: "Switch, leave running on old account",
+                    subtitle: "Only new sessions use the switched account.",
+                    emphasized: false
+                ) { state.activate(acc, migrate: "none"); pendingSwitchId = nil }
+                HStack {
+                    Button("Cancel") { pendingSwitchId = nil }
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.inkMute)
+                    Spacer()
+                }
+            }
         }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Brand.cream))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Brand.sand, lineWidth: 1))
+    }
+
+    // One migration-choice row: bold title + muted subtitle, full-width tap target.
+    @ViewBuilder private func choiceButton(
+        title: String, subtitle: String, emphasized: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 11, weight: emphasized ? .bold : .semibold))
+                    .foregroundStyle(emphasized ? Brand.terracotta : Brand.ink)
+                Text(subtitle)
+                    .font(.system(size: 9)).foregroundStyle(Brand.inkMute)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4).padding(.horizontal, 6)
+            .background(RoundedRectangle(cornerRadius: 5).fill(emphasized ? Brand.terracotta.opacity(0.10) : Color.clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // 3. Resume — list only (caption is pinned by the parent column).
@@ -993,7 +1184,17 @@ struct ContentView: View {
                 } label: {
                     HStack(spacing: 4) {
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(s.title ?? "Untitled").font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
+                            HStack(spacing: 5) {
+                                Text(s.title ?? "Untitled").font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
+                                if let tag = s.accountTag {
+                                    Text(tag)
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundStyle(Brand.terracottaDeep)
+                                        .padding(.horizontal, 5).padding(.vertical, 1)
+                                        .background(Brand.terracotta.opacity(0.16))
+                                        .clipShape(Capsule())
+                                }
+                            }
                             Text(subtitle(s)).font(.system(size: 10)).foregroundStyle(Brand.inkMute).lineLimit(1)
                         }
                         Spacer()
@@ -1046,6 +1247,18 @@ struct ContentView: View {
     // 4. Footer
     @ViewBuilder private var footer: some View {
         VStack(spacing: 6) {
+            if let m = state.migration, (m.active ?? false) || (m.remaining ?? 0) > 0 {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    let remaining = m.remaining ?? 0
+                    let total = m.total ?? 0
+                    Text(remaining > 0
+                        ? "Migrating \(remaining) of \(total) running session\(total == 1 ? "" : "s")…"
+                        : "Migration complete")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.terracotta)
+                    Spacer()
+                }
+            }
             HStack {
                 automationsGlance
                 Spacer()
