@@ -24,10 +24,25 @@ const PORT = 8934;
 const execFileP = promisify(execFile);
 const execP = promisify(execCb);
 
-const CREDS_PATH = path.join(HOME, '.claude', 'credentials.json');
-const ACCOUNTS_REGISTRY_PATH = path.join(HOME, '.claude', 'accounts.json');
+const CLAUDE_DIR = path.join(HOME, '.claude');
+const CREDS_PATH = path.join(CLAUDE_DIR, 'credentials.json');
+const ACCOUNTS_REGISTRY_PATH = path.join(CLAUDE_DIR, 'accounts.json');
 const ACTIVE_SERVICE = 'Claude Code-credentials';
 const KEYCHAIN_ACCOUNT = os.userInfo().username;
+
+// Per-account isolated config dirs for CLAUDE_CONFIG_DIR terminals (feature 3).
+// VERIFIED empirically on macOS (Claude Code 2.1.207): setting CLAUDE_CONFIG_DIR
+// makes the CLI read/write ONLY <dir>/.credentials.json (the dotfile) and never
+// touches the global "Claude Code-credentials" Keychain slot — a bad token in
+// the dir fails to auth rather than falling back to Keychain. So per-account
+// terminals are fully isolated. Each dir holds that account's `.credentials.json`
+// (mode 600, kept in sync with its Keychain stash) plus symlinks into ~/.claude
+// for the shared instruction/config files; `projects/` stays a REAL directory so
+// each account has its own session storage. Created lazily on first use.
+const ACCOUNTS_CONFIG_ROOT = path.join(HOME, '.claude-accounts');
+// Files/dirs symlinked from ~/.claude into each per-account config dir so the
+// isolated terminals keep Mark's global instructions and settings.
+const CONFIG_DIR_LINKS = ['CLAUDE.md', 'USER.md', 'rules', 'settings.json', 'skills', 'agents'];
 
 // ---------- Codex (ChatGPT) provider ----------
 // Codex creds live in a FILE, not Keychain: ~/.codex/auth.json (mode 0600).
@@ -142,26 +157,51 @@ async function parseSessionFile(filePath) {
   };
 }
 
+// Session sources: the global ~/.claude/projects plus every per-account
+// ~/.claude-accounts/<slug>/projects (feature 3). Each source carries the
+// account label + configDir so the index can tag sessions and resume them on
+// the account they ran under.
+async function listSessionSources() {
+  const sources = [{ projectsDir: PROJECTS_DIR, account: null, configDir: null }];
+  let slugs;
+  try { slugs = await fsp.readdir(ACCOUNTS_CONFIG_ROOT, { withFileTypes: true }); }
+  catch { slugs = []; }
+  for (const d of slugs) {
+    if (!d.isDirectory()) continue;
+    const dir = path.join(ACCOUNTS_CONFIG_ROOT, d.name);
+    let account = d.name;
+    try {
+      const meta = JSON.parse(await fsp.readFile(path.join(dir, 'account.json'), 'utf8'));
+      if (meta.email) account = meta.email;
+    } catch { /* fall back to slug */ }
+    sources.push({ projectsDir: path.join(dir, 'projects'), account, configDir: dir });
+  }
+  return sources;
+}
+
+// Returns [{ file, account, configDir }] across all sources.
 async function listSessionFiles() {
   const files = [];
-  let projectDirs;
-  try {
-    projectDirs = await fsp.readdir(PROJECTS_DIR, { withFileTypes: true });
-  } catch {
-    return files;
-  }
-  for (const entry of projectDirs) {
-    if (!entry.isDirectory()) continue;
-    const dir = path.join(PROJECTS_DIR, entry.name);
-    let children;
+  for (const src of await listSessionSources()) {
+    let projectDirs;
     try {
-      children = await fsp.readdir(dir, { withFileTypes: true });
+      projectDirs = await fsp.readdir(src.projectsDir, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const c of children) {
-      if (c.isFile() && c.name.endsWith('.jsonl')) {
-        files.push(path.join(dir, c.name));
+    for (const entry of projectDirs) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(src.projectsDir, entry.name);
+      let children;
+      try {
+        children = await fsp.readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const c of children) {
+        if (c.isFile() && c.name.endsWith('.jsonl')) {
+          files.push({ file: path.join(dir, c.name), account: src.account, configDir: src.configDir });
+        }
       }
     }
   }
@@ -192,7 +232,8 @@ async function buildIndex() {
     const nextCache = {};
     const results = [];
 
-    for (const filePath of files) {
+    for (const f of files) {
+      const filePath = f.file;
       let stat;
       try {
         stat = await fsp.stat(filePath);
@@ -210,6 +251,9 @@ async function buildIndex() {
           continue;
         }
       }
+      // Tag with the owning account + its config dir (global sessions => null),
+      // so RECENTS can show the account and resume can pin CLAUDE_CONFIG_DIR.
+      data = { ...data, account: f.account || null, configDir: f.configDir || null };
       nextCache[filePath] = { mtimeMs: stat.mtimeMs, size: stat.size, data };
       results.push({ ...data, size: stat.size, mtimeMs: stat.mtimeMs });
     }
@@ -298,18 +342,63 @@ function escapeAppleScriptString(s) {
   return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-async function resumeSession(cwd, sessionId) {
+// Build the shell command that resumes a session, optionally pinned to an
+// account's CLAUDE_CONFIG_DIR so it always resumes on the account it ran under.
+function resumeShellCommand(cwd, sessionId, configDir) {
   const dir = cwd || HOME;
-  const script = `tell application "Terminal"
-    activate
-    do script "cd \\"${escapeAppleScriptString(dir)}\\" && claude --resume ${escapeAppleScriptString(sessionId)}"
-  end tell`;
+  const prefix = configDir
+    ? `export CLAUDE_CONFIG_DIR=\\"${escapeAppleScriptString(configDir)}\\" && `
+    : '';
+  return `${prefix}cd \\"${escapeAppleScriptString(dir)}\\" && claude --resume ${escapeAppleScriptString(sessionId)}`;
+}
+
+function runOsascript(script) {
   return new Promise((resolve, reject) => {
     execFile('osascript', ['-e', script], (err) => {
       if (err) reject(err);
       else resolve();
     });
   });
+}
+
+async function resumeSession(cwd, sessionId, configDir = null) {
+  const cmd = resumeShellCommand(cwd, sessionId, configDir);
+  const script = `tell application "Terminal"
+    activate
+    do script "${cmd}"
+  end tell`;
+  return runOsascript(script);
+}
+
+// Resume a session, PREFERRING the Terminal tab whose tty matches `ttyDev`
+// (e.g. "/dev/ttys014") so a migrated session reappears in its original tab.
+// Falls back to a new Terminal window if no tab matches (tab closed, non-Terminal
+// host, or the process had no controlling tty).
+async function resumeSessionInTty(cwd, sessionId, configDir, ttyDev) {
+  const cmd = resumeShellCommand(cwd, sessionId, configDir);
+  if (!ttyDev) return resumeSession(cwd, sessionId, configDir);
+  const target = escapeAppleScriptString(ttyDev);
+  const script = `tell application "Terminal"
+    activate
+    set targetTTY to "${target}"
+    set didResume to false
+    repeat with w in windows
+      repeat with t in tabs of w
+        try
+          if (tty of t) is targetTTY then
+            do script "${cmd}" in t
+            set didResume to true
+            exit repeat
+          end if
+        end try
+      end repeat
+      if didResume then exit repeat
+    end repeat
+    if not didResume then
+      do script "${cmd}"
+    end if
+  end tell`;
+  return runOsascript(script);
 }
 
 // ---------- OAuth loopback login (in-app "Add account") ----------
@@ -930,34 +1019,52 @@ async function activateAccount(targetService) {
   const activeRaw = await readKeychainService(ACTIVE_SERVICE);
   const activeNorm = normalizeBlob(activeRaw);
 
-  // Re-stash the currently-active account BEFORE overwriting it, every
-  // switch (not just first run) — `claude` refreshes the active token in
-  // place, so a previously-stashed copy can be stale.
-  if (activeNorm && activeRaw) {
-    const serviceNames = (await discoverServiceNames()).filter(
-      (s) => s !== ACTIVE_SERVICE && s !== targetService
-    );
-    let matchedStash = null;
-    for (const s of serviceNames) {
-      const raw = await readKeychainService(s);
-      const norm = normalizeBlob(raw);
-      if (norm && norm.accessToken === activeNorm.accessToken) {
-        matchedStash = s;
-        break;
+  // Suspend the clobber-guard for the duration of the swap so it doesn't fight
+  // our own Keychain writes.
+  guard.suspended = true;
+  try {
+    // Re-stash the currently-active account BEFORE overwriting it, every
+    // switch (not just first run) — `claude` refreshes the active token in
+    // place, so a previously-stashed copy can be stale.
+    if (activeNorm && activeRaw) {
+      const serviceNames = (await discoverServiceNames()).filter(
+        (s) => s !== ACTIVE_SERVICE && s !== targetService
+      );
+      let matchedStash = null;
+      for (const s of serviceNames) {
+        const raw = await readKeychainService(s);
+        const norm = normalizeBlob(raw);
+        if (norm && norm.accessToken === activeNorm.accessToken) {
+          matchedStash = s;
+          break;
+        }
       }
+      const stashName = matchedStash || stashServiceName(activeNorm.accessToken);
+      await writeKeychainService(stashName, activeRaw);
     }
-    const stashName = matchedStash || stashServiceName(activeNorm.accessToken);
-    await writeKeychainService(stashName, activeRaw);
+
+    // Activate the target.
+    await writeKeychainService(ACTIVE_SERVICE, targetRaw);
+
+    // Mirror to disk, mode 600.
+    await writeSecretFile(CREDS_PATH, targetRaw);
+
+    // Invalidate cache so the next /api/accounts poll reflects reality.
+    accountCache.clear();
+  } finally {
+    guard.suspended = false;
   }
 
-  // Activate the target.
-  await writeKeychainService(ACTIVE_SERVICE, targetRaw);
-
-  // Mirror to disk, mode 600.
-  await writeSecretFile(CREDS_PATH, targetRaw);
-
-  // Invalidate cache so the next /api/accounts poll reflects reality.
-  accountCache.clear();
+  // Record the expected-active identity for the clobber-guard, and keep this
+  // account's isolated config dir (if any) in sync. Best-effort — a failed
+  // profile fetch just means the guard stays on its previous identity.
+  try {
+    const info = await getAccountInfoCached(targetService, targetNorm.accessToken);
+    if (info.status === 'ok' && info.email) {
+      armGuard(targetRaw, info.email);
+      await syncAccountConfigDir(info.email, targetRaw);
+    }
+  } catch { /* non-fatal */ }
 
   return { ok: true, activeService: targetService };
 }
@@ -2443,6 +2550,383 @@ async function buildSkillsList() {
   return { counts, skills };
 }
 
+// ---------- per-account config dirs (CLAUDE_CONFIG_DIR isolation) ----------
+//
+// Each Claude account gets ~/.claude-accounts/<slug>/ holding its own
+// `.credentials.json` (mode 600) plus symlinks into ~/.claude for the shared
+// instruction/config files, so `CLAUDE_CONFIG_DIR=<dir> claude` runs an isolated,
+// per-account terminal that never touches the global Keychain slot. `projects/`
+// is a REAL directory (per-account session storage). Created lazily.
+
+function accountSlug(email) {
+  return String(email).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'account';
+}
+function accountConfigDir(email) {
+  return path.join(ACCOUNTS_CONFIG_ROOT, accountSlug(email));
+}
+
+// Resolve a keychain service's account email: registry label first (offline),
+// else a live profile fetch. Returns null if it can't be determined.
+async function emailForService(service) {
+  const registry = await loadAccountsRegistry();
+  const lbl = registry[service]?.label;
+  if (lbl && lbl.includes('@')) return lbl;
+  const raw = await readKeychainService(service);
+  const norm = normalizeBlob(raw);
+  if (!norm) return null;
+  const info = await getAccountInfoCached(service, norm.accessToken);
+  return info.status === 'ok' ? info.email : null;
+}
+
+// Create (lazily) a per-account config dir with credentials + shared symlinks.
+async function ensureAccountConfigDir(email, rawBlob) {
+  const dir = accountConfigDir(email);
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.mkdir(path.join(dir, 'projects'), { recursive: true }); // REAL per-account sessions
+  for (const name of CONFIG_DIR_LINKS) {
+    const src = path.join(CLAUDE_DIR, name);
+    const dst = path.join(dir, name);
+    try {
+      if (!fs.existsSync(src)) continue;
+      let st = null;
+      try { st = await fsp.lstat(dst); } catch { st = null; }
+      if (st) continue; // already linked/created — leave it
+      await fsp.symlink(src, dst);
+    } catch { /* non-fatal — a missing symlink just means that shared file isn't inherited */ }
+  }
+  // Non-secret marker for the session index to tag sessions with the account.
+  try { await fsp.writeFile(path.join(dir, 'account.json'), JSON.stringify({ email }), 'utf8'); } catch {}
+  if (rawBlob) { try { await writeSecretFile(path.join(dir, '.credentials.json'), rawBlob); } catch {} }
+  return dir;
+}
+
+// Keep an EXISTING per-account dir's credentials in sync with its Keychain
+// stash. No-op if the dir was never created (lazy — don't materialize on sync).
+async function syncAccountConfigDir(email, rawBlob) {
+  if (!email || !rawBlob) return;
+  const dir = accountConfigDir(email);
+  try { await fsp.access(dir); } catch { return; }
+  try { await writeSecretFile(path.join(dir, '.credentials.json'), rawBlob); } catch {}
+}
+
+// Open a new isolated terminal for `service`'s account.
+async function openAccountTerminal(service) {
+  const email = await emailForService(service);
+  if (!email) { const e = new Error('could not resolve account email'); e.code = 'INVALID'; throw e; }
+  const raw = await readKeychainService(service);
+  const norm = normalizeBlob(raw);
+  if (!norm) { const e = new Error('service does not hold a Claude credential'); e.code = 'INVALID'; throw e; }
+  const dir = await ensureAccountConfigDir(email, raw);
+  const cmd = `export CLAUDE_CONFIG_DIR=\\"${escapeAppleScriptString(dir)}\\" && cd \\"${escapeAppleScriptString(HOME)}\\" && claude`;
+  const script = `tell application "Terminal"\n  activate\n  do script "${cmd}"\nend tell`;
+  await runOsascript(script);
+  return { ok: true, dir, email };
+}
+
+// ---------- running-session detection (ps / lsof / ps eww) ----------
+
+function encodeProjectDir(cwd) {
+  // Claude encodes a cwd as its project dir by replacing every non-alphanumeric
+  // char with '-'  (e.g. /Users/m/Claude Sessions -> -Users-m-Claude-Sessions).
+  return String(cwd).replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+function isClaudeCliCommand(command) {
+  if (!command) return false;
+  const first = command.trim().split(/\s+/)[0];
+  return first.split('/').pop() === 'claude';
+}
+function ttyDevFromPs(tty) {
+  if (!tty || tty === '??' || tty === '-') return null;
+  return tty.startsWith('/dev/') ? tty : `/dev/${tty}`;
+}
+
+async function execOut(cmd, args) {
+  try { return (await execFileP(cmd, args)).stdout; }
+  catch (e) { return e && typeof e.stdout === 'string' ? e.stdout : ''; } // some pids gone → nonzero exit, still parse
+}
+
+async function lsofCwds(pids) {
+  const map = new Map();
+  const out = await execOut('lsof', ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn']);
+  let cur = null;
+  for (const line of out.split('\n')) {
+    if (line[0] === 'p') cur = Number(line.slice(1));
+    else if (line[0] === 'n' && cur != null) map.set(cur, line.slice(1));
+  }
+  return map;
+}
+
+// pid -> CLAUDE_CONFIG_DIR (if that process was launched with the env var).
+async function claudeConfigDirs(pids) {
+  const map = new Map();
+  const out = await execOut('ps', ['eww', '-o', 'pid=,command=', '-p', pids.join(',')]);
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const cm = m[2].match(/CLAUDE_CONFIG_DIR=(\S+)/);
+    if (cm) map.set(Number(m[1]), cm[1]);
+  }
+  return map;
+}
+
+async function newestSessionIdForCwd(cwd, projectsRoot) {
+  const dir = path.join(projectsRoot, encodeProjectDir(cwd));
+  try {
+    let best = null, bestMtime = -1;
+    for (const name of await fsp.readdir(dir)) {
+      if (!name.endsWith('.jsonl')) continue;
+      const st = await fsp.stat(path.join(dir, name)).catch(() => null);
+      if (st && st.mtimeMs > bestMtime) { bestMtime = st.mtimeMs; best = name; }
+    }
+    return best ? path.basename(best, '.jsonl') : null;
+  } catch { return null; }
+}
+
+// All running `claude` CLI processes, mapped to their session where possible.
+// Unmappable ones (no cwd/session) are returned with mappable:false so callers
+// can report "manual restart only" and never touch them.
+async function listRunningClaude() {
+  const out = await execOut('ps', ['-axo', 'pid=,tty=,command=']);
+  const rows = [];
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(\S+)\s+(.*)$/);
+    if (!m) continue;
+    const command = m[3];
+    if (!isClaudeCliCommand(command)) continue;
+    rows.push({ pid: Number(m[1]), tty: m[2], command });
+  }
+  if (rows.length === 0) return [];
+  const pids = rows.map((r) => r.pid);
+  const [cwdByPid, cfgByPid] = await Promise.all([lsofCwds(pids), claudeConfigDirs(pids)]);
+  const results = [];
+  for (const r of rows) {
+    const ttyDev = ttyDevFromPs(r.tty);
+    const cwd = cwdByPid.get(r.pid) || null;
+    const configDir = cfgByPid.get(r.pid) || null;
+    let sessionId = null;
+    const rm = r.command.match(/--resume\s+([0-9a-fA-F][0-9a-fA-F-]{7,})/);
+    if (rm) sessionId = rm[1];
+    else if (cwd) sessionId = await newestSessionIdForCwd(cwd, configDir ? path.join(configDir, 'projects') : PROJECTS_DIR);
+    results.push({
+      pid: r.pid, ttyDev, cwd, sessionId, configDir,
+      pinned: !!configDir, mappable: !!(cwd && sessionId),
+    });
+  }
+  return results;
+}
+
+// ---------- feature 1: graceful migration of running sessions ----------
+
+const MIGRATION_IDLE_MS = 45_000;        // idle = session jsonl mtime older than this
+const MIGRATION_POLL_MS = 10_000;        // idle-mode re-check cadence
+const MIGRATION_GIVEUP_MS = 30 * 60_000; // give up (surface) after ~30 min busy
+const MIGRATION_TERM_GRACE_MS = 5_000;   // SIGTERM grace before SIGKILL
+
+let migration = null; // single in-memory run
+const DONE_STATES = new Set(['done', 'skipped-pinned', 'unmappable', 'gave-up', 'error', 'left-old']);
+
+function migrationSnapshot() {
+  if (!migration) return { active: false, total: 0, done: 0, remaining: 0, sessions: [] };
+  const sessions = [...migration.sessions.values()].map((s) => ({
+    sessionId: s.sessionId, pid: s.pid, cwd: s.cwd, pinned: s.pinned, status: s.status, note: s.note || null,
+  }));
+  const done = sessions.filter((s) => DONE_STATES.has(s.status)).length;
+  return {
+    active: migration.active, mode: migration.mode, startedAt: migration.startedAt,
+    total: sessions.length, done, remaining: sessions.length - done, sessions,
+  };
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+
+function sessionJsonlPath(s) {
+  const root = s.configDir ? path.join(s.configDir, 'projects') : PROJECTS_DIR;
+  return path.join(root, encodeProjectDir(s.cwd), `${s.sessionId}.jsonl`);
+}
+async function sessionIdleMs(s) {
+  const st = await fsp.stat(sessionJsonlPath(s)).catch(() => null);
+  if (!st) return Infinity; // no jsonl → nothing writing → idle
+  return Date.now() - st.mtimeMs;
+}
+
+// SIGTERM (SIGKILL after grace), then resume in the same Terminal tab on the
+// now-active global account. NEVER called for pinned sessions.
+async function killAndResume(s) {
+  s.status = 'migrating';
+  try {
+    try { process.kill(s.pid, 'SIGTERM'); } catch {}
+    const deadline = Date.now() + MIGRATION_TERM_GRACE_MS;
+    while (Date.now() < deadline && pidAlive(s.pid)) await sleep(400);
+    if (pidAlive(s.pid)) { try { process.kill(s.pid, 'SIGKILL'); } catch {} await sleep(400); }
+    await resumeSessionInTty(s.cwd, s.sessionId, null, s.ttyDev);
+    s.status = 'done';
+    console.log(`[migrate] resumed ${s.sessionId} (pid ${s.pid}) in ${s.ttyDev || 'new window'}`);
+  } catch (e) {
+    s.status = 'error'; s.note = String(e && e.message || e);
+    console.log(`[migrate] failed ${s.sessionId}: ${s.note}`);
+  }
+}
+
+function runIdleLoop() {
+  const tick = async () => {
+    if (!migration) return;
+    if (Date.now() - migration.startedAt > MIGRATION_GIVEUP_MS) {
+      for (const s of migration.sessions.values()) {
+        if (s.status === 'waiting-idle') { s.status = 'gave-up'; s.note = 'still busy after 30 min — resume manually'; }
+      }
+      migration.active = false; return;
+    }
+    for (const s of migration.sessions.values()) {
+      if (s.status !== 'waiting-idle') continue;
+      if (!pidAlive(s.pid)) { s.status = 'left-old'; s.note = 'process exited before idle'; continue; }
+      if ((await sessionIdleMs(s)) > MIGRATION_IDLE_MS) await killAndResume(s);
+    }
+    const stillWaiting = [...migration.sessions.values()].some((s) => s.status === 'waiting-idle');
+    if (stillWaiting) migration.timer = setTimeout(tick, MIGRATION_POLL_MS);
+    else migration.active = false;
+  };
+  migration.timer = setTimeout(tick, MIGRATION_POLL_MS);
+}
+
+// Start a migration run after an account switch. mode: 'now' | 'idle'.
+// 'none' never reaches here. Returns the initial snapshot.
+async function startMigration(mode, targetService) {
+  if (migration && migration.timer) clearTimeout(migration.timer);
+  const running = await listRunningClaude();
+  const sessions = new Map();
+  for (const r of running) {
+    let status, note = null;
+    if (r.pinned) { status = 'skipped-pinned'; note = 'isolated (CLAUDE_CONFIG_DIR)'; }
+    else if (!r.mappable) { status = 'unmappable'; note = 'unknown session — manual restart only'; }
+    else status = mode === 'now' ? 'migrating' : 'waiting-idle';
+    sessions.set(r.sessionId || `pid-${r.pid}`, { ...r, status, note });
+  }
+  migration = { active: true, mode, targetService, startedAt: Date.now(), sessions, timer: null };
+
+  const targets = [...sessions.values()].filter((s) => !s.pinned && s.mappable);
+  if (targets.length === 0) { migration.active = false; return migrationSnapshot(); }
+
+  if (mode === 'now') {
+    Promise.all(targets.map(killAndResume)).then(() => { if (migration) migration.active = false; });
+  } else {
+    runIdleLoop();
+  }
+  return migrationSnapshot();
+}
+
+// ---------- feature 2: clobber-guard ----------
+//
+// When an OLD-account session refreshes its OAuth token, the CLI writes that
+// account's fresh creds back to the live Keychain slot + credentials.json,
+// silently overwriting the account we just activated. This guard records the
+// expected-active identity (email) on every activate, watches the slot, and if
+// an intruder appears it (a) preserves the intruder's fresh token under ITS OWN
+// stash, (b) restores the expected account, (c) logs it. Identity is by EMAIL
+// (token rotates); on failure to extract identity it does nothing (never guess).
+
+const GUARD_LOG_FILE = path.join(CACHE_DIR, 'guard-log.json');
+const GUARD_POLL_MS = 60_000;
+let guard = {
+  armed: false, expectedEmail: null, expectedRaw: null, expectedAccessToken: null,
+  suspended: false, watcher: null, poll: null, debounce: null,
+};
+const guardEvents = []; // in-memory ring for the /api/guard endpoint
+
+async function appendGuardLog(evt) {
+  const rec = { ts: Date.now(), ...evt };
+  guardEvents.push(rec);
+  if (guardEvents.length > 100) guardEvents.shift();
+  try {
+    await fsp.mkdir(CACHE_DIR, { recursive: true });
+    let arr = [];
+    try { arr = JSON.parse(await fsp.readFile(GUARD_LOG_FILE, 'utf8')); } catch {}
+    arr.push(rec);
+    if (arr.length > 500) arr = arr.slice(-500);
+    await fsp.writeFile(GUARD_LOG_FILE, JSON.stringify(arr, null, 2));
+  } catch {}
+}
+
+function armGuard(rawBlob, email) {
+  const norm = normalizeBlob(rawBlob);
+  if (!norm || !email) return;
+  guard.armed = true;
+  guard.expectedEmail = email;
+  guard.expectedRaw = rawBlob;
+  guard.expectedAccessToken = norm.accessToken;
+}
+
+async function guardCheck() {
+  if (!guard.armed || guard.suspended || !guard.expectedRaw) return;
+  const liveRaw = await readKeychainService(ACTIVE_SERVICE);
+  const liveNorm = normalizeBlob(liveRaw);
+  if (!liveNorm) return;
+  if (liveNorm.accessToken === guard.expectedAccessToken) return; // unchanged — fast path
+
+  let info;
+  try { info = await getAccountInfoCached(ACTIVE_SERVICE, liveNorm.accessToken); }
+  catch { return; }
+  if (info.status !== 'ok' || !info.email) return; // identity unknown → never guess
+
+  if (info.email === guard.expectedEmail) {
+    // Same account refreshed in place — adopt the fresh blob (so a later rescue
+    // writes the CURRENT token) and keep its pinned dir current.
+    guard.expectedRaw = liveRaw;
+    guard.expectedAccessToken = liveNorm.accessToken;
+    syncAccountConfigDir(info.email, liveRaw).catch(() => {});
+    return;
+  }
+
+  // CLOBBER — a different account overwrote the slot.
+  guard.suspended = true;
+  try {
+    const stashName = stashServiceName(liveNorm.accessToken);
+    await writeKeychainService(stashName, liveRaw);              // (a) preserve intruder's fresh token
+    await syncAccountConfigDir(info.email, liveRaw).catch(() => {});
+    await writeKeychainService(ACTIVE_SERVICE, guard.expectedRaw); // (b) restore expected
+    await writeSecretFile(CREDS_PATH, guard.expectedRaw);
+    accountCache.clear();
+    console.log(`[guard] clobber by ${info.email} → restored ${guard.expectedEmail}; intruder preserved as ${stashName}`);
+    await appendGuardLog({ event: 'clobber-rescued', intruder: info.email, restored: guard.expectedEmail, stashedAs: stashName });
+  } catch (e) {
+    console.log(`[guard] rescue failed: ${e.message}`);
+    await appendGuardLog({ event: 'rescue-failed', error: String(e && e.message || e) });
+  } finally {
+    guard.suspended = false;
+  }
+}
+
+function startGuard() {
+  try {
+    if (!guard.watcher) {
+      // Watch the ~/.claude DIRECTORY (not the file): activate rewrites
+      // credentials.json via atomic rename, which replaces the inode and would
+      // kill a file-level watch. A directory watch survives that and still fires
+      // for credentials.json writes. The 60s Keychain poll below is the primary
+      // backstop (real CLI clobbers write Keychain, which no fs watch can see).
+      guard.watcher = fs.watch(CLAUDE_DIR, { persistent: false }, (_evt, filename) => {
+        if (filename && filename !== 'credentials.json') return;
+        clearTimeout(guard.debounce);
+        guard.debounce = setTimeout(() => { guardCheck().catch(() => {}); }, 500);
+      });
+    }
+  } catch { /* dir may be unwatchable — the 60s poll below is the real backstop */ }
+  if (!guard.poll) guard.poll = setInterval(() => { guardCheck().catch(() => {}); }, GUARD_POLL_MS);
+}
+
+// Arm the guard from the current live slot at boot so the active account is
+// protected even without an explicit activate this session.
+async function armGuardFromLive() {
+  try {
+    const liveRaw = await readKeychainService(ACTIVE_SERVICE);
+    const norm = normalizeBlob(liveRaw);
+    if (!norm) return;
+    const info = await getAccountInfoCached(ACTIVE_SERVICE, norm.accessToken);
+    if (info.status === 'ok' && info.email) armGuard(liveRaw, info.email);
+  } catch { /* best-effort */ }
+}
+
 // ---------- http server ----------
 
 const DASHBOARD_HTML = path.join(__dirname, 'dashboard.html');
@@ -2489,9 +2973,65 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'not found' }));
         return;
       }
-      await resumeSession(session.cwd, session.id);
+      // Resume pinned to the account the session ran under (configDir), so a
+      // per-account session always comes back on its own account.
+      await resumeSession(session.cwd, session.id, session.configDir || null);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    // Running claude CLI sessions — used by the menubar to decide whether to
+    // offer the "migrate running" choices on a switch.
+    if (url.pathname === '/api/claude/running' && req.method === 'GET') {
+      const running = await listRunningClaude();
+      const migratable = running.filter((r) => !r.pinned && r.mappable);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        count: migratable.length,
+        pinned: running.filter((r) => r.pinned).length,
+        unmappable: running.filter((r) => !r.pinned && !r.mappable).length,
+        sessions: running.map((r) => ({
+          sessionId: r.sessionId, cwd: r.cwd, pinned: r.pinned, mappable: r.mappable,
+        })),
+      }));
+      return;
+    }
+
+    // Live migration status (feature 1) for the menubar footer/subtitle.
+    if (url.pathname === '/api/migration' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(migrationSnapshot()));
+      return;
+    }
+
+    // Clobber-guard event log (feature 2) — evidence/debugging.
+    if (url.pathname === '/api/guard' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        armed: guard.armed, expectedEmail: guard.expectedEmail, suspended: guard.suspended,
+        events: guardEvents,
+      }));
+      return;
+    }
+
+    // Open a new isolated per-account terminal (feature 3).
+    if (url.pathname === '/api/accounts/open-terminal' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      if (!body || !body.service) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'service is required' }));
+        return;
+      }
+      try {
+        const result = await openAccountTerminal(body.service);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        console.log(`[open-terminal] failed: ${e.code || ''} ${e.message}`);
+        res.writeHead(e.code === 'INVALID' ? 400 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
       return;
     }
 
@@ -2584,12 +3124,25 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'service is required' }));
         return;
       }
+      // migrate: 'idle' (graceful — kill+resume each running session when it goes
+      // idle) | 'now' (kill+resume all running sessions immediately) | 'none' /
+      // absent (leave running sessions on the old account — backward-compatible).
+      const migrate = (body.migrate === 'idle' || body.migrate === 'now') ? body.migrate : 'none';
       try {
         const result = await activateAccount(body.service);
+        let migration = null;
+        if (migrate !== 'none') {
+          try { migration = await startMigration(migrate, body.service); }
+          catch (e) { console.log(`[migrate] start failed: ${e.message}`); }
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           ...result,
-          note: 'Running claude sessions must be restarted (exit + relaunch) to pick up the new account — new sessions read credentials fresh.',
+          migrate,
+          migration,
+          note: migrate === 'none'
+            ? 'Running claude sessions keep their old account until restarted — new sessions read credentials fresh.'
+            : 'New sessions use the switched account; running sessions are being migrated.',
         }));
       } catch (e) {
         console.log(`[accounts/activate] failed: ${e.code || ''} ${e.message}`);
@@ -2989,6 +3542,10 @@ function readJsonBody(req) {
 // Bind to localhost only — this server can rewrite Keychain credentials via
 // /api/accounts/activate, so it must never be reachable off-box.
 loadUsageCache(); // warm the last-good-usage cache from disk before serving
+// Clobber-guard (feature 2): arm from the current live slot so the active
+// account is protected against old-session token refreshes, then start the
+// watcher + 60s poll.
+armGuardFromLive().finally(() => startGuard());
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`AI Ops dashboard running at http://localhost:${PORT}`);
 });
