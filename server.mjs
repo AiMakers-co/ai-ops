@@ -1051,20 +1051,22 @@ async function activateAccount(targetService) {
 
     // Invalidate cache so the next /api/accounts poll reflects reality.
     accountCache.clear();
+
+    // Re-arm the guard to the NEW target BEFORE lifting the suspension —
+    // otherwise a poll/watch firing between un-suspend and re-arm would see
+    // live(new) != expected(old) and "rescue" the switch straight back to the
+    // old account. Best-effort identity fetch; on failure the guard keeps its
+    // previous identity (a stale guard is safe — worst case it does nothing).
+    try {
+      const info = await getAccountInfoCached(targetService, targetNorm.accessToken);
+      if (info.status === 'ok' && info.email) {
+        armGuard(targetRaw, info.email);
+        await syncAccountConfigDir(info.email, targetRaw);
+      }
+    } catch { /* non-fatal */ }
   } finally {
     guard.suspended = false;
   }
-
-  // Record the expected-active identity for the clobber-guard, and keep this
-  // account's isolated config dir (if any) in sync. Best-effort — a failed
-  // profile fetch just means the guard stays on its previous identity.
-  try {
-    const info = await getAccountInfoCached(targetService, targetNorm.accessToken);
-    if (info.status === 'ok' && info.email) {
-      armGuard(targetRaw, info.email);
-      await syncAccountConfigDir(info.email, targetRaw);
-    }
-  } catch { /* non-fatal */ }
 
   return { ok: true, activeService: targetService };
 }
