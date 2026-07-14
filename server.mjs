@@ -608,12 +608,45 @@ async function readKeychainService(service) {
 }
 
 async function writeKeychainService(service, jsonString) {
+  // Claude Code itself reads/writes this item via /usr/bin/security (verified
+  // empirically 2026-07: a forced token refresh recreated the item with the
+  // exact ACL signature of a `security`-created item), so CLI-created items
+  // are prompt-free for the entire pipeline. -A additionally opens the ACL to
+  // any application, so third-party tools that read Claude credentials via
+  // the Security framework (IDE integrations etc.) don't hit an ACL prompt.
+  // -U updates preserve the existing ACL; -A only takes effect on creates.
   await execFileP('security', [
     'add-generic-password', '-U',
     '-s', service,
     '-a', KEYCHAIN_ACCOUNT,
     '-w', jsonString,
+    '-A',
   ]);
+}
+
+// The real cause of "macOS asks for my password on every token refresh": a
+// login keychain configured to lock on sleep (or on a timeout). Once locked,
+// the next keychain touch — often this server's background refresh loop —
+// makes SecurityAgent demand the login password. That is a machine setting,
+// not something this app can (or should) change silently, so detect it at
+// boot and tell the user exactly how to fix it.
+async function warnIfKeychainAutoLocks() {
+  if (process.platform !== 'darwin') return;
+  try {
+    // NB: `security show-keychain-info` prints to stderr.
+    const { stdout, stderr } = await execFileP('security', ['show-keychain-info']);
+    const info = `${stdout}${stderr}`.trim();
+    if (/lock-on-sleep|timeout=/.test(info)) {
+      console.log(
+        `[keychain] WARNING: your login keychain auto-locks (${info.replace(/^Keychain\s+/, '')}).\n` +
+        `[keychain] macOS will demand your login password whenever anything touches a locked\n` +
+        `[keychain] keychain — including background token refreshes. To stop the prompts, run:\n` +
+        `[keychain]   security set-keychain-settings ~/Library/Keychains/login.keychain-db`
+      );
+    }
+  } catch {
+    // no default keychain / headless environment — nothing to warn about
+  }
 }
 
 // Discover keychain services that might hold Claude account credentials.
@@ -3550,4 +3583,5 @@ loadUsageCache(); // warm the last-good-usage cache from disk before serving
 armGuardFromLive().finally(() => startGuard());
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`AI Ops dashboard running at http://localhost:${PORT}`);
+  warnIfKeychainAutoLocks();
 });
